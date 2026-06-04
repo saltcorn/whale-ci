@@ -1,0 +1,33 @@
+{
+  "name": "dockerci",
+  "version": "1.0.0",
+  "description": "Continuous integration with linked docker containers",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "dockerci": "./src/cli.ts"
+  },
+  "exports": {
+    ".": "./lib/index.ts"
+  },
+  "scripts": {
+    "start": "node src/cli.ts",
+    "test": "node --test",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "lib",
+    "src",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}

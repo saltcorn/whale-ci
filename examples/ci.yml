@@ -1,0 +1,16 @@
+build:
+    dockerfile: ./Dockerfile.build
+
+database:
+    image: postgres
+    volumes:
+       - "pgdata:/var/lib/postgresql/data"
+    ports: 5432
+
+test:
+    dockerfile: ./Dockerfile.test
+    build_depends:
+      - build
+    depends:
+      - database
+    command: runtests
