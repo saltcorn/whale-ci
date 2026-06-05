@@ -65,6 +65,35 @@ The valid keys in each section are:
 * delay: a non-negative number of seconds. The step waits this long after all of
   its dependencies are ready, and before it runs.
 
+# Networking between steps
+
+All steps run on a single Docker network, and each container is reachable from
+the others by its **step name as a hostname**. To connect from one step to
+another, use the target step's name as the host — typically through an
+environment variable — and `depends` on it so it is started first:
+
+```yaml
+database:
+    image: postgres
+    service: true
+    environment:
+       POSTGRES_HOST_AUTH_METHOD: trust
+    ready_on: ready to accept connections
+
+app:
+    dockerfile: ./Dockerfile.app
+    depends:
+      - database
+    environment:
+       DB_HOST: database     # the step name resolves to the database container
+       DB_PORT: 5432
+    command: run-migrations
+```
+
+Inside the `app` container, connecting to host `database` reaches the `database`
+step's container. Use `depends` (and, for services that take a moment to start,
+`ready_on`) so the service is up before the client tries to connect.
+
 # Command-line interface
 
 dock-ci is run from npx. It takes a single argument, the name of the YML 

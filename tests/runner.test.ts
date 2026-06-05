@@ -23,6 +23,8 @@ class FakeDocker implements DockerClient {
   runCommands: (string[] | undefined)[] = [];
   /** Image reference captured per `run`, in call order. */
   runImages: string[] = [];
+  /** The most recent run/startDetached options for each step alias. */
+  launched = new Map<string, RunOptions>();
   /** Container names that never reach their ready_on marker. */
   readyFail = new Set<string>();
 
@@ -52,11 +54,13 @@ class FakeDocker implements DockerClient {
     this.events.push({ kind: "run", arg: options.alias });
     this.runCommands.push(options.command);
     this.runImages.push(options.image);
+    this.launched.set(options.alias, options);
     sink?.(`output of ${options.alias}\n`);
     return this.runExitCodes.get(options.alias) ?? 0;
   }
   async startDetached(options: RunOptions, sink?: OutputSink): Promise<void> {
     this.events.push({ kind: "startDetached", arg: options.alias });
+    this.launched.set(options.alias, options);
     sink?.(`started ${options.alias}\n`);
   }
   followLogs(
@@ -249,6 +253,35 @@ test("a dependent waits for the service's ready_on marker before starting", asyn
   assert.ok(start !== -1 && follow !== -1 && runApp !== -1);
   assert.ok(start < follow, "service starts before we follow its output");
   assert.ok(follow < runApp, "dependent runs only after readiness");
+});
+
+test("a client reaches a service by its step name as the hostname", async () => {
+  const config = parseConfig(
+    `
+database:
+  image: postgres
+  service: true
+app:
+  image: alpine
+  depends: database
+  environment:
+    DB_HOST: database
+  command: connect
+`,
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const { ok } = await runPipeline(config, { docker, ...base });
+
+  assert.equal(ok, true);
+  // The service is published on the shared network under its step name...
+  const database = docker.launched.get("database")!;
+  assert.equal(database.network, "net");
+  assert.equal(database.alias, "database");
+  // ...and the client joins the same network with the step name as the host.
+  const app = docker.launched.get("app")!;
+  assert.equal(app.network, "net");
+  assert.deepEqual(app.environment, ["DB_HOST=database"]);
 });
 
 test("a service that never reaches its ready_on marker fails the pipeline", async () => {
