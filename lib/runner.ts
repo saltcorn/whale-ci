@@ -235,6 +235,12 @@ export async function runPipeline(
         // A service has at most one command (enforced at parse time).
         const argv = step.command ? splitCommand(step.command[0]) : undefined;
         await docker.startDetached(optionsFor(step, argv), sinkFor(step.name));
+        if (step.readyOn !== undefined) {
+          // Hold dependents until the service announces it is ready.
+          log(`Waiting for ${step.name} to be ready (ready_on: ${step.readyOn})`);
+          await docker.waitForReady(containerName(step.name), step.readyOn);
+          log(`Service ${step.name} is ready`);
+        }
         // A service keeps running; it is stopped (and its end recorded) by
         // finish() / teardown once no longer needed.
         return;

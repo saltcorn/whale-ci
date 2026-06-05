@@ -41,6 +41,12 @@ export interface Step {
   environment: string[];
   /** Ports to publish. */
   ports: number[];
+  /**
+   * Readiness marker for a service. When set, steps that depend on this one are
+   * not started until this exact string has appeared in the service's output.
+   * Only valid on a service step.
+   */
+  readyOn?: string;
 }
 
 /** A fully parsed and validated configuration file. */

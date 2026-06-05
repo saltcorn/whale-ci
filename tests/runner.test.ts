@@ -18,6 +18,8 @@ class FakeDocker implements DockerClient {
   runCommands: (string[] | undefined)[] = [];
   /** Image reference captured per `run`, in call order. */
   runImages: string[] = [];
+  /** Container names that never reach their ready_on marker. */
+  readyFail = new Set<string>();
 
   async createNetwork(name: string): Promise<void> {
     this.events.push({ kind: "createNetwork", arg: name });
@@ -55,6 +57,12 @@ class FakeDocker implements DockerClient {
   async logs(name: string, sink?: OutputSink): Promise<void> {
     this.events.push({ kind: "logs", arg: name });
     sink?.(`logs of ${name}\n`);
+  }
+  async waitForReady(name: string, _needle: string): Promise<void> {
+    this.events.push({ kind: "waitForReady", arg: name });
+    if (this.readyFail.has(name)) {
+      throw new Error(`never ready: ${name}`);
+    }
   }
   async commit(container: string, tag: string): Promise<void> {
     this.events.push({ kind: "commit", arg: `${container}->${tag}` });
@@ -195,6 +203,56 @@ job:
   // The skipped service still appears in the report, marked skipped.
   const orphan = steps.find((s) => s.name === "orphan")!;
   assert.equal(orphan.status, "skipped");
+});
+
+const READY_CONFIG = `
+db:
+  image: postgres
+  service: true
+  ready_on: ready to accept connections
+app:
+  image: alpine
+  depends: db
+  command: run
+`;
+
+test("a dependent waits for the service's ready_on marker before starting", async () => {
+  const docker = new FakeDocker();
+  const { ok } = await runPipeline(parseConfig(READY_CONFIG, "/work"), {
+    docker,
+    ...base,
+  });
+
+  assert.equal(ok, true);
+  // The service is started, then we wait for readiness, then the dependent runs.
+  const start = docker.at("startDetached:db");
+  const ready = docker.at("waitForReady:net-db");
+  const runApp = docker.at("run:app");
+  assert.ok(start !== -1 && ready !== -1 && runApp !== -1);
+  assert.ok(start < ready, "service starts before we wait for readiness");
+  assert.ok(ready < runApp, "dependent runs only after readiness");
+});
+
+test("a service that never reaches its ready_on marker fails the pipeline", async () => {
+  const docker = new FakeDocker();
+  docker.readyFail.add("net-db");
+  const { ok, steps } = await runPipeline(parseConfig(READY_CONFIG, "/work"), {
+    docker,
+    ...base,
+  });
+
+  assert.equal(ok, false);
+  // The dependent never starts, and the network is still torn down.
+  assert.deepEqual(docker.kinds("run"), []);
+  assert.deepEqual(docker.kinds("removeNetwork"), ["net"]);
+  assert.equal(steps.find((s) => s.name === "db")!.status, "failure");
+});
+
+test("a service without ready_on is not waited on", async () => {
+  // The README example's `database` service has no ready_on.
+  const docker = new FakeDocker();
+  await runPipeline(load(), { docker, ...base });
+  assert.deepEqual(docker.kinds("waitForReady"), []);
 });
 
 test("non-zero job exit code fails the pipeline but still cleans up", async () => {

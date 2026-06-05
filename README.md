@@ -56,6 +56,12 @@ The valid keys in each section are:
 * disable: `true` or `false` (default `false`). When `true` the step is
   completely ignored: it is dropped from the pipeline and is never built, run,
   reported, or available as a dependency of other steps.
+* ready_on: a string (only valid on a service). Any step that depends on this
+  service is held until this exact string appears in the service's output, so
+  you can wait for a slow-starting service to finish booting (for example a
+  database printing its "ready to accept connections" banner). If the service
+  stops before the string appears, the step fails. The string is matched against
+  the service's combined stdout and stderr.
 
 # Command-line interface
 

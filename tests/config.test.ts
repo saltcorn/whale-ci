@@ -295,6 +295,36 @@ test("a config with every step disabled has no steps", () => {
   );
 });
 
+test("ready_on is parsed onto a service step", () => {
+  const yaml = `
+db:
+  image: postgres
+  service: true
+  ready_on: ready to accept connections
+`;
+  const db = parseConfig(yaml, "/w").steps.get("db")!;
+  assert.equal(db.readyOn, "ready to accept connections");
+});
+
+test("ready_on defaults to undefined", () => {
+  const a = parseConfig("a:\n  image: x", "/w").steps.get("a")!;
+  assert.equal(a.readyOn, undefined);
+});
+
+test("ready_on requires the step to be a service", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  ready_on: up", "/w"),
+    /sets "ready_on" but is not a service/,
+  );
+});
+
+test("ready_on must be a string", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  service: true\n  ready_on: 5", "/w"),
+    /key "ready_on" must be a string/,
+  );
+});
+
 test("normalises a single port and a list of ports", () => {
   const single = parseConfig("a:\n  image: x\n  ports: 80", "/w").steps.get("a")!;
   assert.deepEqual(single.ports, [80]);

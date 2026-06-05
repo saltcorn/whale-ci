@@ -57,6 +57,11 @@ export interface DockerClient {
   startDetached(options: RunOptions, sink?: OutputSink): Promise<void>;
   /** Append a container's logs to the sink; best effort, never rejects. */
   logs(name: string, sink?: OutputSink): Promise<void>;
+  /**
+   * Follow a container's output until `needle` appears in it, then resolve.
+   * Rejects if the container's output ends (it stopped) before `needle` appears.
+   */
+  waitForReady(name: string, needle: string): Promise<void>;
   /** Commit a stopped container's filesystem to a new image tag. */
   commit(container: string, tag: string): Promise<void>;
   /** Remove an image by tag; never rejects. */
@@ -167,6 +172,54 @@ export class CliDockerClient implements DockerClient {
     } catch {
       // Best effort; a container may already be gone.
     }
+  }
+
+  /**
+   * Follow `docker logs -f` (which replays existing output before following, so
+   * a marker printed before we attach is not missed) and resolve as soon as
+   * `needle` is seen. If the container stops first the log stream ends and we
+   * reject, so a service that dies before signalling readiness fails the step.
+   */
+  waitForReady(name: string, needle: string): Promise<void> {
+    return new Promise((resolvePromise, reject) => {
+      const child = spawn(this.#docker, ["logs", "-f", name], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let settled = false;
+      let buffer = "";
+      const scan = (chunk: Buffer): void => {
+        if (settled) return;
+        buffer += chunk.toString();
+        if (buffer.includes(needle)) {
+          settled = true;
+          child.kill();
+          resolvePromise();
+          return;
+        }
+        // Keep a tail long enough to catch a needle split across two chunks.
+        if (buffer.length > needle.length) {
+          buffer = buffer.slice(-needle.length);
+        }
+      };
+      child.stdout?.on("data", scan);
+      child.stderr?.on("data", scan);
+      child.on("error", (err) => {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      });
+      child.on("close", () => {
+        if (!settled) {
+          settled = true;
+          reject(
+            new Error(
+              `Container ${name} stopped before "${needle}" appeared in its output`,
+            ),
+          );
+        }
+      });
+    });
   }
 
   async commit(container: string, tag: string): Promise<void> {

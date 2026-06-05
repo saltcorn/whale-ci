@@ -13,6 +13,7 @@ const KNOWN_KEYS = new Set([
   "environment",
   "ports",
   "disable",
+  "ready_on",
 ]);
 
 /** Read, parse and validate a config file, returning the structured Config. */
@@ -108,6 +109,13 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     );
   }
 
+  const readyOn = optionalString(raw["ready_on"], name, "ready_on");
+  if (readyOn !== undefined && !service) {
+    throw new ConfigError(
+      `Step "${name}" sets "ready_on" but is not a service; ready_on only applies to services`,
+    );
+  }
+
   return {
     name,
     dockerfile,
@@ -117,6 +125,7 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     command,
     environment: envList(raw["environment"], name),
     ports: portList(raw["ports"], name),
+    readyOn,
   };
 }
 
