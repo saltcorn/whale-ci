@@ -17,6 +17,12 @@ export interface RunOptions {
   /** Environment variables, as `KEY=value` strings. */
   environment: string[];
   ports: number[];
+  /**
+   * When true the container is left in place after it exits (no `--rm`) so its
+   * filesystem can be committed; the caller is then responsible for removing it.
+   * Defaults to removing the container automatically.
+   */
+  keep?: boolean;
 }
 
 /**
@@ -51,6 +57,10 @@ export interface DockerClient {
   startDetached(options: RunOptions, sink?: OutputSink): Promise<void>;
   /** Append a container's logs to the sink; best effort, never rejects. */
   logs(name: string, sink?: OutputSink): Promise<void>;
+  /** Commit a stopped container's filesystem to a new image tag. */
+  commit(container: string, tag: string): Promise<void>;
+  /** Remove an image by tag; never rejects. */
+  removeImage(tag: string): Promise<void>;
   /** Stop and remove a container by name; never rejects. */
   stop(name: string): Promise<void>;
 }
@@ -85,7 +95,9 @@ export function buildArgs(
 
 /** Build the argv for `docker run`, shared by foreground and detached runs. */
 export function runArgs(options: RunOptions, detached: boolean): string[] {
-  const args = ["run", "--rm", detached ? "-d" : "-i"];
+  const args = ["run"];
+  if (!options.keep) args.push("--rm");
+  args.push(detached ? "-d" : "-i");
   args.push("--name", options.name);
   args.push("--network", options.network);
   args.push("--network-alias", options.alias);
@@ -154,6 +166,18 @@ export class CliDockerClient implements DockerClient {
       await this.#exec(["logs", name], { sink, quiet: sink === undefined });
     } catch {
       // Best effort; a container may already be gone.
+    }
+  }
+
+  async commit(container: string, tag: string): Promise<void> {
+    await this.#exec(["commit", container, tag], { quiet: true });
+  }
+
+  async removeImage(tag: string): Promise<void> {
+    try {
+      await this.#exec(["image", "rm", "-f", tag], { quiet: true });
+    } catch {
+      // Best effort while cleaning up intermediate images.
     }
   }
 

@@ -14,6 +14,10 @@ class FakeDocker implements DockerClient {
   events: Event[] = [];
   runExitCodes = new Map<string, number>();
   failBuild = new Set<string>();
+  /** Container command argv captured per `run`, in call order. */
+  runCommands: (string[] | undefined)[] = [];
+  /** Image reference captured per `run`, in call order. */
+  runImages: string[] = [];
 
   async createNetwork(name: string): Promise<void> {
     this.events.push({ kind: "createNetwork", arg: name });
@@ -39,6 +43,8 @@ class FakeDocker implements DockerClient {
   }
   async run(options: RunOptions, sink?: OutputSink): Promise<number> {
     this.events.push({ kind: "run", arg: options.alias });
+    this.runCommands.push(options.command);
+    this.runImages.push(options.image);
     sink?.(`output of ${options.alias}\n`);
     return this.runExitCodes.get(options.alias) ?? 0;
   }
@@ -49,6 +55,12 @@ class FakeDocker implements DockerClient {
   async logs(name: string, sink?: OutputSink): Promise<void> {
     this.events.push({ kind: "logs", arg: name });
     sink?.(`logs of ${name}\n`);
+  }
+  async commit(container: string, tag: string): Promise<void> {
+    this.events.push({ kind: "commit", arg: `${container}->${tag}` });
+  }
+  async removeImage(tag: string): Promise<void> {
+    this.events.push({ kind: "removeImage", arg: tag });
   }
   async stop(name: string): Promise<void> {
     this.events.push({ kind: "stop", arg: name });
@@ -240,6 +252,74 @@ test:
   const buildImg = docker.at("build:dockerci/build:latest");
   const runTest = docker.at("run:test");
   assert.ok(buildImg !== -1 && buildImg < runTest);
+});
+
+test("a list of commands runs each through the entrypoint, committing between them", async () => {
+  const config = parseConfig(
+    `
+job:
+  image: alpine
+  command:
+    - run-tests data
+    - run-tests server
+`,
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const { ok, steps } = await runPipeline(config, { docker, ...base });
+
+  assert.equal(ok, true);
+  assert.deepEqual(docker.kinds("pull"), ["alpine"]);
+  // Each command runs as its own (bare argv) container, preserving the entrypoint.
+  assert.deepEqual(docker.kinds("run"), ["job", "job"]);
+  assert.deepEqual(docker.runCommands, [
+    ["run-tests", "data"],
+    ["run-tests", "server"],
+  ]);
+  // The second command builds on a snapshot of the first's filesystem.
+  assert.deepEqual(docker.runImages, ["alpine", "net-job-snapshot0"]);
+  assert.deepEqual(docker.kinds("commit"), ["net-job-cmd0->net-job-snapshot0"]);
+  // Both per-command containers are removed and the snapshot image cleaned up.
+  assert.deepEqual(docker.kinds("stop"), ["net-job-cmd0", "net-job-cmd1"]);
+  assert.deepEqual(docker.kinds("removeImage"), ["net-job-snapshot0"]);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "success");
+});
+
+test("a single command runs as bare argv in a throwaway container", async () => {
+  const config = parseConfig("job:\n  image: alpine\n  command: run tests", "/work");
+  const docker = new FakeDocker();
+  await runPipeline(config, { docker, ...base });
+  assert.deepEqual(docker.runCommands, [["run", "tests"]]);
+  // No commit / snapshot machinery for a single command.
+  assert.deepEqual(docker.kinds("commit"), []);
+  assert.deepEqual(docker.kinds("removeImage"), []);
+});
+
+test("a failing command stops the chain, fails the step and cleans up", async () => {
+  const config = parseConfig(
+    `
+job:
+  image: alpine
+  command:
+    - first
+    - second
+    - third
+`,
+    "/work",
+  );
+  const docker = new FakeDocker();
+  // FakeDocker returns by alias, so the first `job` command fails immediately.
+  docker.runExitCodes.set("job", 3);
+  const { ok, steps } = await runPipeline(config, { docker, ...base });
+
+  assert.equal(ok, false);
+  // Only the first command runs; the remaining commands are skipped.
+  assert.deepEqual(docker.kinds("run"), ["job"]);
+  assert.deepEqual(docker.kinds("commit"), []);
+  // The first command's container is still removed during teardown.
+  assert.deepEqual(docker.kinds("stop"), ["net-job-cmd0"]);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "failure");
+  assert.deepEqual(docker.kinds("removeNetwork"), ["net"]);
 });
 
 test("report records status, duration and captured output per step", async () => {

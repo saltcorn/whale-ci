@@ -42,7 +42,7 @@ test("parses the README example into normalised steps", () => {
   const t = config.steps.get("test")!;
   assert.equal(t.service, false);
   assert.deepEqual(t.depends, ["build", "database"]);
-  assert.equal(t.command, "runtests");
+  assert.deepEqual(t.command, ["runtests"]);
 });
 
 test("service defaults to false and rejects non-boolean values", () => {
@@ -190,6 +190,59 @@ b:
   image: a
 `;
   assert.throws(() => parseConfig(yaml, "/w"), /cycle/);
+});
+
+test("normalises a single command string to a one-element list", () => {
+  const a = parseConfig("a:\n  image: x\n  command: runtests", "/w").steps.get("a")!;
+  assert.deepEqual(a.command, ["runtests"]);
+});
+
+test("accepts a list of commands", () => {
+  const yaml = `
+a:
+  image: x
+  command:
+    - npm ci
+    - npm test
+`;
+  const a = parseConfig(yaml, "/w").steps.get("a")!;
+  assert.deepEqual(a.command, ["npm ci", "npm test"]);
+});
+
+test("an empty command list means no command", () => {
+  const a = parseConfig("a:\n  image: x\n  command: []", "/w").steps.get("a")!;
+  assert.equal(a.command, undefined);
+});
+
+test("rejects non-string entries in a command list", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  command:\n    - 1", "/w"),
+    /command" must contain only strings/,
+  );
+});
+
+test("a service may not have multiple commands", () => {
+  const yaml = `
+a:
+  image: x
+  service: true
+  command:
+    - one
+    - two
+`;
+  assert.throws(() => parseConfig(yaml, "/w"), /cannot run multiple commands/);
+});
+
+test("a service may have a single command", () => {
+  const yaml = `
+a:
+  image: x
+  service: true
+  command:
+    - serve
+`;
+  const a = parseConfig(yaml, "/w").steps.get("a")!;
+  assert.deepEqual(a.command, ["serve"]);
 });
 
 test("normalises a single port and a list of ports", () => {

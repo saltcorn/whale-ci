@@ -85,13 +85,21 @@ function parseStep(name: string, raw: unknown): Step {
     );
   }
 
+  const service = optionalBoolean(raw["service"], name) ?? false;
+  const command = commandList(raw["command"], name);
+  if (service && command !== undefined && command.length > 1) {
+    throw new ConfigError(
+      `Step "${name}" is a service and cannot run multiple commands`,
+    );
+  }
+
   return {
     name,
     dockerfile,
     image,
-    service: optionalBoolean(raw["service"], name) ?? false,
+    service,
     depends: stringList(raw["depends"], name, "depends"),
-    command: optionalString(raw["command"], name, "command"),
+    command,
     environment: envList(raw["environment"], name),
     ports: portList(raw["ports"], name),
   };
@@ -236,6 +244,34 @@ function stringList(value: unknown, step: string, key: string): string[] {
     }
     return item;
   });
+}
+
+/**
+ * Accept a `command` as either a single string or a list of strings, always
+ * returning a list of command lines. An empty list (or no value) yields
+ * `undefined`, meaning the step has no command.
+ */
+function commandList(value: unknown, step: string): string[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value === "string") {
+    return [value];
+  }
+  if (!Array.isArray(value)) {
+    throw new ConfigError(
+      `Step "${step}" key "command" must be a string or list of strings`,
+    );
+  }
+  const commands = value.map((item) => {
+    if (typeof item !== "string") {
+      throw new ConfigError(
+        `Step "${step}" key "command" must contain only strings`,
+      );
+    }
+    return item;
+  });
+  return commands.length > 0 ? commands : undefined;
 }
 
 /**

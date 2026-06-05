@@ -101,15 +101,78 @@ export async function runPipeline(
     };
   };
 
-  const optionsFor = (step: Step): RunOptions => ({
-    image: imageTag(step),
-    name: containerName(step.name),
+  const optionsFor = (
+    step: Step,
+    command: string[] | undefined,
+    overrides: { image?: string; name?: string; keep?: boolean } = {},
+  ): RunOptions => ({
+    image: overrides.image ?? imageTag(step),
+    name: overrides.name ?? containerName(step.name),
     network,
     alias: step.name,
-    command: splitCommand(step.command),
+    command,
     environment: step.environment,
     ports: step.ports,
+    keep: overrides.keep,
   });
+
+  /**
+   * Run a non-service step's commands. A single command runs in a throwaway
+   * `--rm` container. Multiple commands each run through the image's entrypoint
+   * in turn, and the container is committed to a temporary image between them so
+   * filesystem state carries forward — this keeps any ENTRYPOINT intact (unlike
+   * a shell `&&` join, which the entrypoint would swallow). Execution stops at
+   * the first command that fails, which fails the whole step.
+   */
+  const runCommands = async (step: Step, commands: string[]): Promise<void> => {
+    const sink = sinkFor(step.name);
+    if (commands.length === 1) {
+      log(`Running ${step.name}: ${commands[0]}`);
+      const code = await docker.run(
+        optionsFor(step, splitCommand(commands[0])),
+        sink,
+      );
+      if (code !== 0) {
+        throw new Error(`Step "${step.name}" failed with exit code ${code}`);
+      }
+      return;
+    }
+
+    let image = imageTag(step);
+    const intermediates: string[] = [];
+    try {
+      for (let i = 0; i < commands.length; i++) {
+        const container = `${containerName(step.name)}-cmd${i}`;
+        const last = i === commands.length - 1;
+        try {
+          log(`Running ${step.name}: ${commands[i]}`);
+          const code = await docker.run(
+            optionsFor(step, splitCommand(commands[i]), {
+              image,
+              name: container,
+              keep: true,
+            }),
+            sink,
+          );
+          if (code !== 0) {
+            throw new Error(`Step "${step.name}" failed with exit code ${code}`);
+          }
+          if (!last) {
+            // Snapshot the container's filesystem for the next command to build on.
+            image = `${containerName(step.name)}-snapshot${i}`;
+            await docker.commit(container, image);
+            intermediates.push(image);
+          }
+        } finally {
+          await docker.stop(container);
+        }
+      }
+    } finally {
+      for (const tag of intermediates) {
+        await docker.removeImage(tag);
+      }
+    }
+  };
 
   const buildOrPull = async (step: Step): Promise<void> => {
     const sink = sinkFor(step.name);
@@ -169,7 +232,9 @@ export async function runPipeline(
         await buildOrPull(step);
         log(`Starting service ${step.name}`);
         started.add(step.name);
-        await docker.startDetached(optionsFor(step), sinkFor(step.name));
+        // A service has at most one command (enforced at parse time).
+        const argv = step.command ? splitCommand(step.command[0]) : undefined;
+        await docker.startDetached(optionsFor(step, argv), sinkFor(step.name));
         // A service keeps running; it is stopped (and its end recorded) by
         // finish() / teardown once no longer needed.
         return;
@@ -177,13 +242,7 @@ export async function runPipeline(
 
       await buildOrPull(step);
       if (step.command !== undefined) {
-        // Jobs run with `--rm`, so they clean themselves up; only services are
-        // tracked for explicit teardown.
-        log(`Running ${step.name}: ${step.command}`);
-        const code = await docker.run(optionsFor(step), sinkFor(step.name));
-        if (code !== 0) {
-          throw new Error(`Step "${step.name}" failed with exit code ${code}`);
-        }
+        await runCommands(step, step.command);
       }
       record.endedAt = Date.now();
       await finish(step);

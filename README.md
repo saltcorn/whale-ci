@@ -45,7 +45,12 @@ The valid keys in each section are:
 * depends: the name (or list of names) of other steps that must be ready before
   this step runs. A dependency that is a service must be running first; a
   dependency that is not a service must have completed first.
-* command: the command to run inside the container.
+* command: the command to run inside the container. May be a single string or a
+  list of strings. A list runs in order, stopping at the first command that
+  exits non-zero (which fails the step). Each command runs through the image's
+  entrypoint just like a single command would, and the container's filesystem is
+  committed between commands so changes from one carry forward to the next. A
+  service step may have at most one command.
 * environment: environment variables for the container, given either as a
   mapping (`KEY: value`) or a list of `KEY=value` strings.
 

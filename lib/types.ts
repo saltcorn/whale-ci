@@ -30,8 +30,13 @@ export interface Step {
    * completed.
    */
   depends: string[];
-  /** Command to run inside the container. */
-  command?: string;
+  /**
+   * Commands to run inside the container, as a list of command lines. A single
+   * `command:` string is normalised to a one-element list. For a non-service
+   * step the commands run sequentially, stopping (and failing the step) at the
+   * first one that exits non-zero. A service step has at most one command.
+   */
+  command?: string[];
   /** Environment variables for the container, as `KEY=value` strings. */
   environment: string[];
   /** Ports to publish. */

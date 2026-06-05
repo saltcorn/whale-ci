@@ -79,6 +79,21 @@ test("runArgs builds foreground run with env and ports", () => {
   ]);
 });
 
+test("runArgs omits --rm when keep is set so the container can be committed", () => {
+  const options: RunOptions = {
+    image: "alpine",
+    name: "net-job-cmd0",
+    network: "net",
+    alias: "job",
+    environment: [],
+    ports: [],
+    keep: true,
+  };
+  const args = runArgs(options, false);
+  assert.ok(!args.includes("--rm"), "keep should drop --rm");
+  assert.deepEqual(args.slice(0, 2), ["run", "-i"]);
+});
+
 test("runArgs builds detached run and appends the command", () => {
   const options: RunOptions = {
     image: "dockerci/test:latest",
