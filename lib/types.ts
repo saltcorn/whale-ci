@@ -13,6 +13,12 @@ export interface Step {
   /** Image to pull when there is no Dockerfile. */
   image?: string;
   /**
+   * When `image` names another step that builds its own image, this holds that
+   * step's name. The container then runs that step's generated image instead of
+   * pulling from a registry, and an implicit dependency on it is added.
+   */
+  imageFrom?: string;
+  /**
    * When true, the container runs in the background for as long as at least one
    * other step still depends on it, then is stopped. When false, the container
    * runs its command to completion before dependents proceed.

@@ -116,6 +116,9 @@ export async function runPipeline(
     if (step.dockerfile !== undefined) {
       log(`Building ${step.name} (${step.dockerfile})`);
       await docker.build(imageTag(step), step.dockerfile, config.baseDir, sink);
+    } else if (step.imageFrom !== undefined) {
+      // The image is produced by the build step we depend on; nothing to pull.
+      log(`Using image from ${step.imageFrom} for ${step.name}`);
     } else {
       log(`Pulling ${step.name} (${step.image})`);
       await docker.pull(step.image!, sink);

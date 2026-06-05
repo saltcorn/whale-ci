@@ -57,6 +57,10 @@ export interface DockerClient {
 
 /** The image tag used for a step. Built steps get a `dockerci/` prefix. */
 export function imageTag(step: Step): string {
+  // An `image` that names another build step runs that step's generated image.
+  if (step.imageFrom !== undefined) {
+    return `dockerci/${step.imageFrom}:latest`;
+  }
   if (step.image !== undefined) {
     return step.image;
   }

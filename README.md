@@ -34,7 +34,11 @@ on the linked docker registry.
 The valid keys in each section are:
 
 * dockerfile: A path to a Docker file to build, relative to the yaml file locatiom
-* image: the image to pull if there is no docker file
+* image: the image to pull if there is no docker file. If the value matches the
+  name of another step that builds its own image (a step with a `dockerfile`),
+  that step's generated image is used instead of pulling from the registry, and
+  an implicit dependency on that step is added (even without `depends`).
+  Otherwise the image is pulled from Docker Hub as usual.
 * service: `true` or `false` (default `false`). A service runs in the background
   for as long as at least one other step still depends on it, and is stopped as
   soon as it is no longer required. A non-service runs its command to completion.

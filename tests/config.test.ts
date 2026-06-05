@@ -133,6 +133,65 @@ c:
   assert.equal(config.steps.size, 3);
 });
 
+test("an image matching a build step links to it and adds an implicit dependency", () => {
+  const yaml = `
+build:
+  dockerfile: ./Dockerfile.build
+test:
+  image: build
+  command: runtests
+`;
+  const config = parseConfig(yaml, "/w");
+  const test = config.steps.get("test")!;
+  assert.equal(test.imageFrom, "build");
+  assert.deepEqual(test.depends, ["build"]);
+});
+
+test("an existing explicit dependency is not duplicated when linking images", () => {
+  const yaml = `
+build:
+  dockerfile: ./Dockerfile.build
+test:
+  image: build
+  depends: build
+  command: runtests
+`;
+  const test = parseConfig(yaml, "/w").steps.get("test")!;
+  assert.equal(test.imageFrom, "build");
+  assert.deepEqual(test.depends, ["build"]);
+});
+
+test("an image that does not match a build step is left to be pulled", () => {
+  // `postgres` is not a step name, so it is pulled from the registry as before.
+  const a = parseConfig("a:\n  image: postgres", "/w").steps.get("a")!;
+  assert.equal(a.imageFrom, undefined);
+  assert.deepEqual(a.depends, []);
+});
+
+test("an image matching a non-build (pull-only) step is not linked", () => {
+  // `db` only pulls an image; it has no generated image to reuse.
+  const yaml = `
+db:
+  image: postgres
+a:
+  image: db
+`;
+  const a = parseConfig(yaml, "/w").steps.get("a")!;
+  assert.equal(a.imageFrom, undefined);
+  assert.deepEqual(a.depends, []);
+});
+
+test("image links that form a cycle are rejected", () => {
+  const yaml = `
+a:
+  dockerfile: ./Da
+  depends: b
+b:
+  image: a
+`;
+  assert.throws(() => parseConfig(yaml, "/w"), /cycle/);
+});
+
 test("normalises a single port and a list of ports", () => {
   const single = parseConfig("a:\n  image: x\n  ports: 80", "/w").steps.get("a")!;
   assert.deepEqual(single.ports, [80]);

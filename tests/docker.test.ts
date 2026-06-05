@@ -27,6 +27,13 @@ test("imageTag uses the pulled image name, or a dockerci tag for builds", () => 
   );
 });
 
+test("imageTag uses a referenced build step's generated image", () => {
+  assert.equal(
+    imageTag(step({ name: "test", image: "build", imageFrom: "build" })),
+    "dockerci/build:latest",
+  );
+});
+
 test("splitCommand splits on whitespace and handles empties", () => {
   assert.deepEqual(splitCommand("runtests"), ["runtests"]);
   assert.deepEqual(splitCommand("  npm   test "), ["npm", "test"]);

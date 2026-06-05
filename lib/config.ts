@@ -54,6 +54,7 @@ export function parseConfig(text: string, baseDir: string): Config {
   }
 
   validateReferences(steps);
+  resolveImageReferences(steps);
   detectCycles(steps);
 
   return { steps, baseDir };
@@ -108,6 +109,25 @@ function validateReferences(steps: Map<string, Step>): void {
           `Step "${step.name}" depends on unknown step "${dep}"`,
         );
       }
+    }
+  }
+}
+
+/**
+ * When a step's `image` names another step that builds its own image (i.e. has
+ * a `dockerfile`), wire the two together: the step runs that build step's
+ * generated image rather than pulling from a registry, and gains an implicit
+ * dependency on it so the image exists before the step runs. An `image` that
+ * does not name a build step is left untouched and pulled as before.
+ */
+function resolveImageReferences(steps: Map<string, Step>): void {
+  for (const step of steps.values()) {
+    if (step.image === undefined) continue;
+    const target = steps.get(step.image);
+    if (target === undefined || target.dockerfile === undefined) continue;
+    step.imageFrom = step.image;
+    if (!step.depends.includes(step.image)) {
+      step.depends = [...step.depends, step.image];
     }
   }
 }

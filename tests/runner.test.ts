@@ -218,6 +218,30 @@ test("a build-only step (no command, not a service) is only built", async () => 
   assert.deepEqual(docker.kinds("stop"), []);
 });
 
+test("a step whose image names a build step reuses it without pulling", async () => {
+  const config = parseConfig(
+    `
+build:
+  dockerfile: ./Dockerfile.build
+test:
+  image: build
+  command: runtests
+`,
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const { ok } = await runPipeline(config, { docker, ...base });
+
+  assert.equal(ok, true);
+  // Only the build step is built; nothing is pulled for `test`.
+  assert.deepEqual(docker.kinds("build"), ["dockerci/build:latest"]);
+  assert.deepEqual(docker.kinds("pull"), []);
+  // `test` runs the generated image, after the build (the implicit dependency).
+  const buildImg = docker.at("build:dockerci/build:latest");
+  const runTest = docker.at("run:test");
+  assert.ok(buildImg !== -1 && buildImg < runTest);
+});
+
 test("report records status, duration and captured output per step", async () => {
   const docker = new FakeDocker();
   const { steps } = await runPipeline(load(), {
