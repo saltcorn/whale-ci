@@ -1,6 +1,6 @@
 {
   "name": "dock-ci",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Continuous integration with linked docker containers",
   "type": "module",
   "engines": {
