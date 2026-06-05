@@ -19,20 +19,37 @@ export interface RunOptions {
 }
 
 /**
+ * Receives chunks of combined stdout/stderr from a docker command, so a step's
+ * output can be captured for the HTML report. When no sink is given the command
+ * streams straight to the terminal instead.
+ */
+export type OutputSink = (chunk: string) => void;
+
+/**
  * The docker operations the runner needs. Abstracted behind an interface so
  * the orchestration can be tested without a real docker daemon.
+ *
+ * Methods that produce user-facing output take an optional `sink`; when present
+ * the output is both streamed to the terminal and forwarded to the sink.
  */
 export interface DockerClient {
   createNetwork(name: string): Promise<void>;
   removeNetwork(name: string): Promise<void>;
   /** Build an image from a Dockerfile. */
-  build(tag: string, dockerfile: string, context: string): Promise<void>;
+  build(
+    tag: string,
+    dockerfile: string,
+    context: string,
+    sink?: OutputSink,
+  ): Promise<void>;
   /** Pull an image from a registry. */
-  pull(image: string): Promise<void>;
+  pull(image: string, sink?: OutputSink): Promise<void>;
   /** Run a container to completion, resolving with its exit code. */
-  run(options: RunOptions): Promise<number>;
+  run(options: RunOptions, sink?: OutputSink): Promise<number>;
   /** Start a container detached, resolving once it is running. */
-  startDetached(options: RunOptions): Promise<void>;
+  startDetached(options: RunOptions, sink?: OutputSink): Promise<void>;
+  /** Append a container's logs to the sink; best effort, never rejects. */
+  logs(name: string, sink?: OutputSink): Promise<void>;
   /** Stop and remove a container by name; never rejects. */
   stop(name: string): Promise<void>;
 }
@@ -100,20 +117,39 @@ export class CliDockerClient implements DockerClient {
     }
   }
 
-  async build(tag: string, dockerfile: string, context: string): Promise<void> {
-    await this.#exec(buildArgs(tag, resolve(context, dockerfile), resolve(context)));
+  async build(
+    tag: string,
+    dockerfile: string,
+    context: string,
+    sink?: OutputSink,
+  ): Promise<void> {
+    await this.#exec(
+      buildArgs(tag, resolve(context, dockerfile), resolve(context)),
+      { sink },
+    );
   }
 
-  async pull(image: string): Promise<void> {
-    await this.#exec(["pull", image]);
+  async pull(image: string, sink?: OutputSink): Promise<void> {
+    await this.#exec(["pull", image], { sink });
   }
 
-  async run(options: RunOptions): Promise<number> {
-    return await this.#exec(runArgs(options, false), { allowNonZero: true });
+  async run(options: RunOptions, sink?: OutputSink): Promise<number> {
+    return await this.#exec(runArgs(options, false), {
+      allowNonZero: true,
+      sink,
+    });
   }
 
-  async startDetached(options: RunOptions): Promise<void> {
-    await this.#exec(runArgs(options, true));
+  async startDetached(options: RunOptions, sink?: OutputSink): Promise<void> {
+    await this.#exec(runArgs(options, true), { sink });
+  }
+
+  async logs(name: string, sink?: OutputSink): Promise<void> {
+    try {
+      await this.#exec(["logs", name], { sink, quiet: sink === undefined });
+    } catch {
+      // Best effort; a container may already be gone.
+    }
   }
 
   async stop(name: string): Promise<void> {
@@ -126,17 +162,34 @@ export class CliDockerClient implements DockerClient {
   }
 
   /**
-   * Spawn `docker` with the given args, inheriting stdio so build/test output
-   * streams to the user. Resolves with the exit code; rejects on non-zero
-   * unless `allowNonZero` is set.
+   * Spawn `docker` with the given args. With a `sink` the output is piped and
+   * teed to both the terminal and the sink (for the report); otherwise stdio is
+   * inherited so docker can stream directly. Resolves with the exit code;
+   * rejects on non-zero unless `allowNonZero` is set.
    */
   #exec(
     args: string[],
-    opts: { allowNonZero?: boolean; quiet?: boolean } = {},
+    opts: { allowNonZero?: boolean; quiet?: boolean; sink?: OutputSink } = {},
   ): Promise<number> {
     return new Promise((resolvePromise, reject) => {
-      const stdio = opts.quiet ? "ignore" : "inherit";
+      const stdio = opts.sink ? "pipe" : opts.quiet ? "ignore" : "inherit";
       const child = spawn(this.#docker, args, { stdio });
+
+      if (opts.sink) {
+        const tee = (
+          stream: NodeJS.ReadableStream | null,
+          out: NodeJS.WriteStream,
+        ): void => {
+          stream?.on("data", (chunk: Buffer) => {
+            const text = chunk.toString();
+            out.write(text);
+            opts.sink!(text);
+          });
+        };
+        tee(child.stdout, process.stdout);
+        tee(child.stderr, process.stderr);
+      }
+
       child.on("error", reject);
       child.on("close", (code) => {
         const exitCode = code ?? 1;

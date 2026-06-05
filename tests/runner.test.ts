@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseConfig } from "../lib/config.ts";
-import type { DockerClient, RunOptions } from "../lib/docker.ts";
+import type { DockerClient, OutputSink, RunOptions } from "../lib/docker.ts";
 import { dependentsOf, runPipeline } from "../lib/runner.ts";
 
 interface Event {
@@ -21,21 +21,34 @@ class FakeDocker implements DockerClient {
   async removeNetwork(name: string): Promise<void> {
     this.events.push({ kind: "removeNetwork", arg: name });
   }
-  async build(tag: string): Promise<void> {
+  async build(
+    tag: string,
+    _dockerfile: string,
+    _context: string,
+    sink?: OutputSink,
+  ): Promise<void> {
     this.events.push({ kind: "build", arg: tag });
+    sink?.(`building ${tag}\n`);
     if (this.failBuild.has(tag)) {
       throw new Error(`build failed: ${tag}`);
     }
   }
-  async pull(image: string): Promise<void> {
+  async pull(image: string, sink?: OutputSink): Promise<void> {
     this.events.push({ kind: "pull", arg: image });
+    sink?.(`pulling ${image}\n`);
   }
-  async run(options: RunOptions): Promise<number> {
+  async run(options: RunOptions, sink?: OutputSink): Promise<number> {
     this.events.push({ kind: "run", arg: options.alias });
+    sink?.(`output of ${options.alias}\n`);
     return this.runExitCodes.get(options.alias) ?? 0;
   }
-  async startDetached(options: RunOptions): Promise<void> {
+  async startDetached(options: RunOptions, sink?: OutputSink): Promise<void> {
     this.events.push({ kind: "startDetached", arg: options.alias });
+    sink?.(`started ${options.alias}\n`);
+  }
+  async logs(name: string, sink?: OutputSink): Promise<void> {
+    this.events.push({ kind: "logs", arg: name });
+    sink?.(`logs of ${name}\n`);
   }
   async stop(name: string): Promise<void> {
     this.events.push({ kind: "stop", arg: name });
@@ -69,6 +82,7 @@ function load() {
 }
 
 const silent = () => {};
+const base = { network: "net", log: silent };
 
 test("dependentsOf maps each step to the steps that depend on it", () => {
   const deps = dependentsOf(load());
@@ -79,11 +93,7 @@ test("dependentsOf maps each step to the steps that depend on it", () => {
 
 test("happy path builds, pulls, starts service, runs job, cleans up", async () => {
   const docker = new FakeDocker();
-  const ok = await runPipeline(load(), {
-    docker,
-    network: "net",
-    log: silent,
-  });
+  const { ok } = await runPipeline(load(), { docker, ...base });
 
   assert.equal(ok, true);
   // both dockerfile steps are built, the service image is pulled.
@@ -101,7 +111,7 @@ test("happy path builds, pulls, starts service, runs job, cleans up", async () =
 
 test("service starts before its dependent and is stopped once no longer required", async () => {
   const docker = new FakeDocker();
-  await runPipeline(load(), { docker, network: "net", log: silent });
+  await runPipeline(load(), { docker, ...base });
 
   const startDb = docker.at("startDetached:database");
   const runTest = docker.at("run:test");
@@ -113,7 +123,7 @@ test("service starts before its dependent and is stopped once no longer required
 
 test("a non-service dependency runs to completion before its dependent", async () => {
   const docker = new FakeDocker();
-  await runPipeline(load(), { docker, network: "net", log: silent });
+  await runPipeline(load(), { docker, ...base });
   // `build` is a non-service dependency: its image must be built before `test` runs.
   const buildImg = docker.at("build:dockerci/build:latest");
   const runTest = docker.at("run:test");
@@ -138,7 +148,7 @@ app:
     "/work",
   );
   const docker = new FakeDocker();
-  const ok = await runPipeline(config, { docker, network: "net", log: silent });
+  const { ok } = await runPipeline(config, { docker, ...base });
 
   assert.equal(ok, true);
   assert.deepEqual(docker.kinds("startDetached"), ["db", "cache"]);
@@ -163,23 +173,22 @@ job:
     "/work",
   );
   const docker = new FakeDocker();
-  const ok = await runPipeline(config, { docker, network: "net", log: silent });
+  const { ok, steps } = await runPipeline(config, { docker, ...base });
 
   assert.equal(ok, true);
   assert.deepEqual(docker.kinds("pull"), ["alpine"]);
   assert.deepEqual(docker.kinds("startDetached"), []);
   assert.deepEqual(docker.kinds("run"), ["job"]);
   assert.deepEqual(docker.kinds("stop"), []);
+  // The skipped service still appears in the report, marked skipped.
+  const orphan = steps.find((s) => s.name === "orphan")!;
+  assert.equal(orphan.status, "skipped");
 });
 
 test("non-zero job exit code fails the pipeline but still cleans up", async () => {
   const docker = new FakeDocker();
   docker.runExitCodes.set("test", 7);
-  const ok = await runPipeline(load(), {
-    docker,
-    network: "net",
-    log: silent,
-  });
+  const { ok } = await runPipeline(load(), { docker, ...base });
 
   assert.equal(ok, false);
   // The service was never released by the failed job, so teardown stops it.
@@ -191,11 +200,7 @@ test("build failure fails the pipeline and still cleans up", async () => {
   const docker = new FakeDocker();
   const config = parseConfig("solo:\n  dockerfile: ./D\n", "/work");
   docker.failBuild.add("dockerci/solo:latest");
-  const ok = await runPipeline(config, {
-    docker,
-    network: "net",
-    log: silent,
-  });
+  const { ok } = await runPipeline(config, { docker, ...base });
 
   assert.equal(ok, false);
   assert.deepEqual(docker.kinds("removeNetwork"), ["net"]);
@@ -204,15 +209,58 @@ test("build failure fails the pipeline and still cleans up", async () => {
 test("a build-only step (no command, not a service) is only built", async () => {
   const docker = new FakeDocker();
   const config = parseConfig("build:\n  dockerfile: ./D\n", "/work");
-  const ok = await runPipeline(config, {
-    docker,
-    network: "net",
-    log: silent,
-  });
+  const { ok } = await runPipeline(config, { docker, ...base });
 
   assert.equal(ok, true);
   assert.deepEqual(docker.kinds("build"), ["dockerci/build:latest"]);
   assert.deepEqual(docker.kinds("run"), []);
   assert.deepEqual(docker.kinds("startDetached"), []);
   assert.deepEqual(docker.kinds("stop"), []);
+});
+
+test("report records status, duration and captured output per step", async () => {
+  const docker = new FakeDocker();
+  const { steps } = await runPipeline(load(), {
+    docker,
+    ...base,
+    captureOutput: true,
+  });
+
+  // Reported in config order, every step present including the service.
+  assert.deepEqual(steps.map((s) => s.name), ["build", "database", "test"]);
+
+  const byName = new Map(steps.map((s) => [s.name, s]));
+  assert.equal(byName.get("build")!.status, "success");
+  assert.equal(byName.get("database")!.service, true);
+  assert.equal(byName.get("test")!.status, "success");
+
+  // Service output includes its captured container logs.
+  assert.match(byName.get("database")!.output, /started database/);
+  assert.match(byName.get("database")!.output, /logs of net-database/);
+  // Job output includes the command output.
+  assert.match(byName.get("test")!.output, /output of test/);
+
+  for (const step of steps) {
+    assert.ok(step.durationMs >= 0);
+  }
+});
+
+test("failed step is reported as failure", async () => {
+  const docker = new FakeDocker();
+  docker.runExitCodes.set("test", 2);
+  const { steps } = await runPipeline(load(), {
+    docker,
+    ...base,
+    captureOutput: true,
+  });
+  const t = steps.find((s) => s.name === "test")!;
+  assert.equal(t.status, "failure");
+});
+
+test("output is not captured unless requested", async () => {
+  const docker = new FakeDocker();
+  const { steps } = await runPipeline(load(), { docker, ...base });
+  // No logs fetched and output buffers stay empty when not capturing.
+  assert.deepEqual(docker.kinds("logs"), []);
+  assert.ok(steps.every((s) => s.output === ""));
 });

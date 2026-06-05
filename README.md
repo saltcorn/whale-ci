@@ -14,15 +14,15 @@ build:
 
 database:
     image: postgres
+    service: true
     volumes: 
        - "pgdata:/var/lib/postgresql/data"
     ports: 5432
 
 test:
     dockerfile: ./Dockerfile.test
-    build_depends: 
-      - build
     depends:
+      - build
       - database
     command: runtests
 
@@ -35,8 +35,12 @@ The valid keys in each section are:
 
 * dockerfile: A path to a Docker file to build, relative to the yaml file locatiom
 * image: the image to pull if there is no docker file
-* build_depends: this is the name of another step, it must be built first. 
-* depends: this container must be built and running before this image can run
+* service: `true` or `false` (default `false`). A service runs in the background
+  for as long as at least one other step still depends on it, and is stopped as
+  soon as it is no longer required. A non-service runs its command to completion.
+* depends: the name (or list of names) of other steps that must be ready before
+  this step runs. A dependency that is a service must be running first; a
+  dependency that is not a service must have completed first.
 * command: the command to run inside the container.
 
 # Command-line interface
@@ -55,3 +59,12 @@ each step's dependencies). if any build or command returns an error, the test ha
 and the overall command fails, with an error code of 1.
 
 At the end, whether the test succeeded or not, all running containers are stopped.
+
+## Options
+
+* `-o`, `--output <file>`: write a self-contained HTML report to `<file>`. The
+  report has one initially-closed accordion per step (services included) showing
+  the step name, whether it passed or failed, its execution duration, and all of
+  the captured build and container-run output.
+
+`npx dockerci -o report.html ci.yml`
