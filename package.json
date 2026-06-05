@@ -7,19 +7,23 @@
     "node": ">=22.18"
   },
   "bin": {
-    "dockerci": "./src/cli.ts"
+    "dock-ci": "./dist/src/cli.js"
   },
   "exports": {
-    ".": "./lib/index.ts"
+    ".": {
+      "types": "./dist/lib/index.d.ts",
+      "default": "./dist/lib/index.js"
+    }
   },
   "scripts": {
     "start": "node src/cli.ts",
     "test": "node --test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
   },
   "files": [
-    "lib",
-    "src",
+    "dist",
     "README.md"
   ],
   "license": "MIT",

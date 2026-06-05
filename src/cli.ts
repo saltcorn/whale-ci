@@ -7,7 +7,7 @@ import { renderReport } from "../lib/report.ts";
 import { runPipeline } from "../lib/runner.ts";
 import { ConfigError } from "../lib/types.ts";
 
-const HELP = `dockerci - continuous integration with linked docker containers
+const HELP = `dock-ci - continuous integration with linked docker containers
 
 Usage:
   npx dock-ci [options] <config.yml>

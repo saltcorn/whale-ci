@@ -1,4 +1,4 @@
-# dockerci
+# dock-ci
 Continuous integration with docker containers
 
 This runs CI jobs that are defined in docker containers. The containers 
@@ -47,7 +47,7 @@ The valid keys in each section are:
 
 # Command-line interface
 
-Dockerci is run from npx. It takes a single argument, the name of the YML 
+dock-ci is run from npx. It takes a single argument, the name of the YML 
 configuration file. It assumes docker is installed on the host machine.
 
 `npx dock-ci ci.yml`
