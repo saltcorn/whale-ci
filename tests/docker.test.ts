@@ -14,7 +14,6 @@ function step(partial: Partial<Step> & { name: string }): Step {
     service: false,
     depends: [],
     environment: [],
-    volumes: [],
     ports: [],
     ...partial,
   };
@@ -46,14 +45,13 @@ test("buildArgs constructs a docker build invocation", () => {
   ]);
 });
 
-test("runArgs builds foreground run with env, volumes and ports", () => {
+test("runArgs builds foreground run with env and ports", () => {
   const options: RunOptions = {
     image: "postgres",
     name: "net-database",
     network: "net",
     alias: "database",
     environment: ["POSTGRES_HOST_AUTH_METHOD=trust"],
-    volumes: ["pgdata:/var/lib/postgresql/data"],
     ports: [5432],
   };
   assert.deepEqual(runArgs(options, false), [
@@ -68,8 +66,6 @@ test("runArgs builds foreground run with env, volumes and ports", () => {
     "database",
     "-e",
     "POSTGRES_HOST_AUTH_METHOD=trust",
-    "-v",
-    "pgdata:/var/lib/postgresql/data",
     "-p",
     "5432:5432",
     "postgres",
@@ -84,7 +80,6 @@ test("runArgs builds detached run and appends the command", () => {
     alias: "test",
     command: ["npm", "test"],
     environment: [],
-    volumes: [],
     ports: [],
   };
   const args = runArgs(options, true);

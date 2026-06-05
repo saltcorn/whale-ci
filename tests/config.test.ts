@@ -10,8 +10,8 @@ build:
 database:
     image: postgres
     service: true
-    volumes:
-       - "pgdata:/var/lib/postgresql/data"
+    environment:
+       POSTGRES_HOST_AUTH_METHOD: trust
     ports: 5432
 
 test:
@@ -36,7 +36,7 @@ test("parses the README example into normalised steps", () => {
   const database = config.steps.get("database")!;
   assert.equal(database.image, "postgres");
   assert.equal(database.service, true);
-  assert.deepEqual(database.volumes, ["pgdata:/var/lib/postgresql/data"]);
+  assert.deepEqual(database.environment, ["POSTGRES_HOST_AUTH_METHOD=trust"]);
   assert.deepEqual(database.ports, [5432]);
 
   const t = config.steps.get("test")!;
@@ -133,18 +133,13 @@ c:
   assert.equal(config.steps.size, 3);
 });
 
-test("normalises scalar volumes and list ports", () => {
-  const yaml = `
-a:
-  image: x
-  volumes: data:/data
-  ports:
-    - 80
-    - 443
-`;
-  const a = parseConfig(yaml, "/w").steps.get("a")!;
-  assert.deepEqual(a.volumes, ["data:/data"]);
-  assert.deepEqual(a.ports, [80, 443]);
+test("normalises a single port and a list of ports", () => {
+  const single = parseConfig("a:\n  image: x\n  ports: 80", "/w").steps.get("a")!;
+  assert.deepEqual(single.ports, [80]);
+
+  const many = parseConfig("a:\n  image: x\n  ports:\n    - 80\n    - 443", "/w")
+    .steps.get("a")!;
+  assert.deepEqual(many.ports, [80, 443]);
 });
 
 test("parses environment as a mapping, coercing scalars to strings", () => {

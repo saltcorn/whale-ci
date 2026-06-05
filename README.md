@@ -17,8 +17,6 @@ database:
     service: true
     environment:
        POSTGRES_HOST_AUTH_METHOD: trust
-    volumes: 
-       - "pgdata:/var/lib/postgresql/data"
     ports: 5432
 
 test:

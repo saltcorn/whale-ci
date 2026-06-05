@@ -2,8 +2,8 @@
  * A single CI step, as declared in one section of the YAML config file.
  *
  * Either `dockerfile` or `image` is always present (exactly one of them).
- * The array fields default to `[]` and `volumes`/`ports` are normalised
- * during parsing so consumers never have to handle the scalar shorthand.
+ * The array fields default to `[]` and `ports` is normalised during parsing so
+ * consumers never have to handle the scalar shorthand.
  */
 export interface Step {
   /** The section name, e.g. `build`, `database`, `test`. */
@@ -28,8 +28,6 @@ export interface Step {
   command?: string;
   /** Environment variables for the container, as `KEY=value` strings. */
   environment: string[];
-  /** Volume mounts, e.g. `pgdata:/var/lib/postgresql/data`. */
-  volumes: string[];
   /** Ports to publish. */
   ports: number[];
 }

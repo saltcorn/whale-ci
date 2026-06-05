@@ -11,7 +11,6 @@ const KNOWN_KEYS = new Set([
   "depends",
   "command",
   "environment",
-  "volumes",
   "ports",
 ]);
 
@@ -93,7 +92,6 @@ function parseStep(name: string, raw: unknown): Step {
     depends: stringList(raw["depends"], name, "depends"),
     command: optionalString(raw["command"], name, "command"),
     environment: envList(raw["environment"], name),
-    volumes: stringList(raw["volumes"], name, "volumes"),
     ports: portList(raw["ports"], name),
   };
 }
