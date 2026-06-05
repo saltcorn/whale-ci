@@ -11,7 +11,7 @@ The smallest dockerci example: a static site served by nginx.
 Run it from this directory:
 
 ```sh
-npx dockerci ci.yml
+npx dock-ci ci.yml
 # or, from a checkout of this repo:
 node ../../src/cli.ts ci.yml
 

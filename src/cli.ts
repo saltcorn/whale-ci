@@ -10,7 +10,7 @@ import { ConfigError } from "../lib/types.ts";
 const HELP = `dockerci - continuous integration with linked docker containers
 
 Usage:
-  npx dockerci [options] <config.yml>
+  npx dock-ci [options] <config.yml>
 
 Options:
   -o, --output <file>   Write an HTML report of every step (build output,

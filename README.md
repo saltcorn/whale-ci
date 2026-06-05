@@ -50,7 +50,7 @@ The valid keys in each section are:
 Dockerci is run from npx. It takes a single argument, the name of the YML 
 configuration file. It assumes docker is installed on the host machine.
 
-`npx dockerci ci.yml`
+`npx dock-ci ci.yml`
 
 If no file is given it prints an error. If the argumnt is `--help` it prints a 
 brief help message. It validates the input yaml file and prints an error if it does not
@@ -69,4 +69,4 @@ At the end, whether the test succeeded or not, all running containers are stoppe
   the step name, whether it passed or failed, its execution duration, and all of
   the captured build and container-run output.
 
-`npx dockerci -o report.html ci.yml`
+`npx dock-ci -o report.html ci.yml`
