@@ -245,6 +245,56 @@ a:
   assert.deepEqual(a.command, ["serve"]);
 });
 
+test("a disabled step is completely ignored", () => {
+  const yaml = `
+build:
+  dockerfile: ./Dockerfile.build
+scratch:
+  image: alpine
+  disable: true
+`;
+  const config = parseConfig(yaml, "/w");
+  assert.deepEqual([...config.steps.keys()], ["build"]);
+  assert.equal(config.steps.has("scratch"), false);
+});
+
+test("disable: false leaves the step in the pipeline", () => {
+  const a = parseConfig("a:\n  image: x\n  disable: false", "/w").steps.get("a")!;
+  assert.ok(a);
+});
+
+test("a disabled step need not be otherwise valid", () => {
+  // No dockerfile/image, which would normally be required; ignored when disabled.
+  const config = parseConfig("a:\n  image: x\nstub:\n  disable: true", "/w");
+  assert.deepEqual([...config.steps.keys()], ["a"]);
+});
+
+test("disable must be a boolean", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  disable: yes", "/w"),
+    /key "disable" must be true or false/,
+  );
+});
+
+test("depending on a disabled step is an unknown-step error", () => {
+  const yaml = `
+build:
+  dockerfile: ./D
+  disable: true
+test:
+  image: x
+  depends: build
+`;
+  assert.throws(() => parseConfig(yaml, "/w"), /depends on unknown step "build"/);
+});
+
+test("a config with every step disabled has no steps", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  disable: true", "/w"),
+    /at least one step/,
+  );
+});
+
 test("normalises a single port and a list of ports", () => {
   const single = parseConfig("a:\n  image: x\n  ports: 80", "/w").steps.get("a")!;
   assert.deepEqual(single.ports, [80]);

@@ -53,6 +53,9 @@ The valid keys in each section are:
   service step may have at most one command.
 * environment: environment variables for the container, given either as a
   mapping (`KEY: value`) or a list of `KEY=value` strings.
+* disable: `true` or `false` (default `false`). When `true` the step is
+  completely ignored: it is dropped from the pipeline and is never built, run,
+  reported, or available as a dependency of other steps.
 
 # Command-line interface
 

@@ -12,6 +12,7 @@ const KNOWN_KEYS = new Set([
   "command",
   "environment",
   "ports",
+  "disable",
 ]);
 
 /** Read, parse and validate a config file, returning the structured Config. */
@@ -46,7 +47,13 @@ export function parseConfig(text: string, baseDir: string): Config {
 
   const steps = new Map<string, Step>();
   for (const [name, raw] of Object.entries(doc)) {
-    steps.set(name, parseStep(name, raw));
+    // A disabled step is completely ignored: parseStep returns undefined and it
+    // never enters the pipeline (so it is not built, run, reported, or eligible
+    // as a dependency target).
+    const step = parseStep(name, raw);
+    if (step !== undefined) {
+      steps.set(name, step);
+    }
   }
 
   if (steps.size === 0) {
@@ -60,10 +67,18 @@ export function parseConfig(text: string, baseDir: string): Config {
   return { steps, baseDir };
 }
 
-/** Validate and normalise a single step section. */
-function parseStep(name: string, raw: unknown): Step {
+/**
+ * Validate and normalise a single step section. Returns `undefined` when the
+ * step sets `disable: true`, signalling that it should be completely ignored.
+ */
+function parseStep(name: string, raw: unknown): Step | undefined {
   if (!isPlainObject(raw)) {
     throw new ConfigError(`Step "${name}" must be a mapping`);
+  }
+
+  // Checked first so a disabled step is dropped without further validation.
+  if (optionalBoolean(raw["disable"], name, "disable") === true) {
+    return undefined;
   }
 
   for (const key of Object.keys(raw)) {
@@ -85,7 +100,7 @@ function parseStep(name: string, raw: unknown): Step {
     );
   }
 
-  const service = optionalBoolean(raw["service"], name) ?? false;
+  const service = optionalBoolean(raw["service"], name, "service") ?? false;
   const command = commandList(raw["command"], name);
   if (service && command !== undefined && command.length > 1) {
     throw new ConfigError(
@@ -213,12 +228,13 @@ function optionalString(
 function optionalBoolean(
   value: unknown,
   step: string,
+  key: string,
 ): boolean | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
   if (typeof value !== "boolean") {
-    throw new ConfigError(`Step "${step}" key "service" must be true or false`);
+    throw new ConfigError(`Step "${step}" key "${key}" must be true or false`);
   }
   return value;
 }
