@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "../lib/config.ts";
 import { renderReport } from "../lib/report.ts";
 import { runPipeline } from "../lib/runner.ts";
@@ -100,9 +102,25 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
+/**
+ * True when this module is the process entry point (rather than imported, e.g.
+ * by tests). Portable across Node 22+ — `import.meta.main` only exists on Node
+ * 24.2+. `realpathSync` resolves the npx bin symlink so it matches the module
+ * URL.
+ */
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
 // Only run when invoked as the CLI entry point, so the module can also be
 // imported (e.g. by tests) without executing the pipeline.
-if (import.meta.main) {
+if (isEntryPoint()) {
   main(process.argv).then(
     (code) => {
       process.exitCode = code;
