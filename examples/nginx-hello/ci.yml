@@ -1,0 +1,17 @@
+# The simplest possible dockerci pipeline: build a static nginx site, run it as
+# a background service, and check it answers over HTTP.
+
+web:
+  dockerfile: ./Dockerfile
+  service: true
+  # Publish the container's port 8080 on the host so you can browse
+  # http://localhost:8080 while the pipeline is running.
+  ports: 8080
+
+test:
+  # curlimages/curl has `curl` as its entrypoint, so `command` is just curl's
+  # arguments. --retry-connrefused waits for nginx to finish starting up.
+  image: curlimages/curl
+  depends:
+    - web
+  command: --retry 5 --retry-connrefused --retry-delay 1 -sSf http://web:8080/

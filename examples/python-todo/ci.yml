@@ -1,0 +1,27 @@
+# A Python TODO API tested end to end against a real Postgres database.
+#
+#   database (service) <- web (service) <- test (job)
+#
+# dockerci starts the database, then the web app (which waits for the database
+# and creates its table), then runs the test job. When the test finishes, the
+# web and database services are torn down automatically.
+
+database:
+  image: postgres:16-alpine
+  service: true
+  environment:
+    # Throwaway CI database: allow the app to connect as the default `postgres`
+    # user with no password. Do not use trust auth in production.
+    POSTGRES_HOST_AUTH_METHOD: trust
+
+web:
+  dockerfile: ./Dockerfile
+  service: true
+  depends:
+    - database
+
+test:
+  dockerfile: ./Dockerfile.test
+  depends:
+    - web
+  command: /test.sh

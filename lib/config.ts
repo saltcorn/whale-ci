@@ -10,6 +10,7 @@ const KNOWN_KEYS = new Set([
   "service",
   "depends",
   "command",
+  "environment",
   "volumes",
   "ports",
 ]);
@@ -91,6 +92,7 @@ function parseStep(name: string, raw: unknown): Step {
     service: optionalBoolean(raw["service"], name) ?? false,
     depends: stringList(raw["depends"], name, "depends"),
     command: optionalString(raw["command"], name, "command"),
+    environment: envList(raw["environment"], name),
     volumes: stringList(raw["volumes"], name, "volumes"),
     ports: portList(raw["ports"], name),
   };
@@ -216,6 +218,47 @@ function stringList(value: unknown, step: string, key: string): string[] {
     }
     return item;
   });
+}
+
+/**
+ * Accept environment variables either as a mapping (`KEY: value`) or a list of
+ * `KEY=value` strings, always returning a list of `KEY=value` strings.
+ */
+function envList(value: unknown, step: string): string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (typeof item !== "string") {
+        throw new ConfigError(
+          `Step "${step}" key "environment" list must contain "KEY=value" strings`,
+        );
+      }
+      return item;
+    });
+  }
+  if (isPlainObject(value)) {
+    return Object.entries(value).map(
+      ([key, val]) => `${key}=${envValue(val, step, key)}`,
+    );
+  }
+  throw new ConfigError(
+    `Step "${step}" key "environment" must be a mapping or a list`,
+  );
+}
+
+/** Coerce a single environment value (string, number or boolean) to a string. */
+function envValue(value: unknown, step: string, key: string): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  throw new ConfigError(
+    `Step "${step}" environment value for "${key}" must be a string, number or boolean`,
+  );
 }
 
 /** Accept a single port number or a list of them. */

@@ -14,6 +14,8 @@ export interface RunOptions {
   alias: string;
   /** Command to run inside the container, already split into argv. */
   command?: string[];
+  /** Environment variables, as `KEY=value` strings. */
+  environment: string[];
   volumes: string[];
   ports: number[];
 }
@@ -84,6 +86,9 @@ export function runArgs(options: RunOptions, detached: boolean): string[] {
   args.push("--name", options.name);
   args.push("--network", options.network);
   args.push("--network-alias", options.alias);
+  for (const env of options.environment) {
+    args.push("-e", env);
+  }
   for (const volume of options.volumes) {
     args.push("-v", volume);
   }

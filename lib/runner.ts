@@ -107,6 +107,7 @@ export async function runPipeline(
     network,
     alias: step.name,
     command: splitCommand(step.command),
+    environment: step.environment,
     volumes: step.volumes,
     ports: step.ports,
   });

@@ -15,6 +15,8 @@ build:
 database:
     image: postgres
     service: true
+    environment:
+       POSTGRES_HOST_AUTH_METHOD: trust
     volumes: 
        - "pgdata:/var/lib/postgresql/data"
     ports: 5432
@@ -42,6 +44,8 @@ The valid keys in each section are:
   this step runs. A dependency that is a service must be running first; a
   dependency that is not a service must have completed first.
 * command: the command to run inside the container.
+* environment: environment variables for the container, given either as a
+  mapping (`KEY: value`) or a list of `KEY=value` strings.
 
 # Command-line interface
 

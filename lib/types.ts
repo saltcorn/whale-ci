@@ -26,6 +26,8 @@ export interface Step {
   depends: string[];
   /** Command to run inside the container. */
   command?: string;
+  /** Environment variables for the container, as `KEY=value` strings. */
+  environment: string[];
   /** Volume mounts, e.g. `pgdata:/var/lib/postgresql/data`. */
   volumes: string[];
   /** Ports to publish. */

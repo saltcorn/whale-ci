@@ -147,6 +147,46 @@ a:
   assert.deepEqual(a.ports, [80, 443]);
 });
 
+test("parses environment as a mapping, coercing scalars to strings", () => {
+  const yaml = `
+a:
+  image: x
+  environment:
+    POSTGRES_HOST_AUTH_METHOD: trust
+    PORT: 5432
+    DEBUG: true
+`;
+  const a = parseConfig(yaml, "/w").steps.get("a")!;
+  assert.deepEqual(a.environment, [
+    "POSTGRES_HOST_AUTH_METHOD=trust",
+    "PORT=5432",
+    "DEBUG=true",
+  ]);
+});
+
+test("parses environment as a list of KEY=value strings", () => {
+  const yaml = `
+a:
+  image: x
+  environment:
+    - FOO=bar
+    - BAZ=qux
+`;
+  const a = parseConfig(yaml, "/w").steps.get("a")!;
+  assert.deepEqual(a.environment, ["FOO=bar", "BAZ=qux"]);
+});
+
+test("environment defaults to empty and rejects nested values", () => {
+  assert.deepEqual(
+    parseConfig("a:\n  image: x", "/w").steps.get("a")!.environment,
+    [],
+  );
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  environment:\n    K:\n      nested: 1", "/w"),
+    /environment value for "K"/,
+  );
+});
+
 test("rejects non-integer ports", () => {
   assert.throws(
     () => parseConfig("a:\n  image: x\n  ports: notaport", "/w"),

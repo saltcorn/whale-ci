@@ -13,6 +13,7 @@ function step(partial: Partial<Step> & { name: string }): Step {
   return {
     service: false,
     depends: [],
+    environment: [],
     volumes: [],
     ports: [],
     ...partial,
@@ -45,12 +46,13 @@ test("buildArgs constructs a docker build invocation", () => {
   ]);
 });
 
-test("runArgs builds foreground run with volumes and ports", () => {
+test("runArgs builds foreground run with env, volumes and ports", () => {
   const options: RunOptions = {
     image: "postgres",
     name: "net-database",
     network: "net",
     alias: "database",
+    environment: ["POSTGRES_HOST_AUTH_METHOD=trust"],
     volumes: ["pgdata:/var/lib/postgresql/data"],
     ports: [5432],
   };
@@ -64,6 +66,8 @@ test("runArgs builds foreground run with volumes and ports", () => {
     "net",
     "--network-alias",
     "database",
+    "-e",
+    "POSTGRES_HOST_AUTH_METHOD=trust",
     "-v",
     "pgdata:/var/lib/postgresql/data",
     "-p",
@@ -79,6 +83,7 @@ test("runArgs builds detached run and appends the command", () => {
     network: "net",
     alias: "test",
     command: ["npm", "test"],
+    environment: [],
     volumes: [],
     ports: [],
   };

@@ -1,0 +1,6 @@
+FROM alpine:3
+
+RUN apk add --no-cache curl
+
+COPY test.sh /test.sh
+RUN chmod +x /test.sh
