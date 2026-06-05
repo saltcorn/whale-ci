@@ -1,11 +1,8 @@
 import type { Config, Step } from "./types.ts";
 
-/** The combined set of prerequisites for a step (build_depends ∪ depends). */
+/** The deduplicated set of prerequisites for a step. */
 export function prerequisites(step: Step): string[] {
-  const seen = new Set<string>();
-  for (const dep of step.build_depends) seen.add(dep);
-  for (const dep of step.depends) seen.add(dep);
-  return [...seen];
+  return [...new Set(step.depends)];
 }
 
 /**

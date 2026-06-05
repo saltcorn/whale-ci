@@ -9,10 +9,12 @@ build:
   dockerfile: ./D.build
 database:
   image: postgres
+  service: true
 test:
   dockerfile: ./D.test
-  build_depends: build
-  depends: database
+  depends:
+    - build
+    - database
 `;
 
 test("processes every step exactly once, respecting dependencies", async () => {

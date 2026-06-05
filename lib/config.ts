@@ -7,7 +7,7 @@ import { type Config, ConfigError, type Step } from "./types.ts";
 const KNOWN_KEYS = new Set([
   "dockerfile",
   "image",
-  "build_depends",
+  "service",
   "depends",
   "command",
   "volumes",
@@ -88,7 +88,7 @@ function parseStep(name: string, raw: unknown): Step {
     name,
     dockerfile,
     image,
-    build_depends: stringList(raw["build_depends"], name, "build_depends"),
+    service: optionalBoolean(raw["service"], name) ?? false,
     depends: stringList(raw["depends"], name, "depends"),
     command: optionalString(raw["command"], name, "command"),
     volumes: stringList(raw["volumes"], name, "volumes"),
@@ -96,10 +96,10 @@ function parseStep(name: string, raw: unknown): Step {
   };
 }
 
-/** Ensure every build_depends/depends target names a real step. */
+/** Ensure every depends target names a real step. */
 function validateReferences(steps: Map<string, Step>): void {
   for (const step of steps.values()) {
-    for (const dep of [...step.build_depends, ...step.depends]) {
+    for (const dep of step.depends) {
       if (dep === step.name) {
         throw new ConfigError(`Step "${step.name}" cannot depend on itself`);
       }
@@ -113,8 +113,8 @@ function validateReferences(steps: Map<string, Step>): void {
 }
 
 /**
- * Detect dependency cycles across the combined build_depends + depends graph
- * using an iterative depth-first search.
+ * Detect dependency cycles across the depends graph using an iterative
+ * depth-first search.
  */
 function detectCycles(steps: Map<string, Step>): void {
   const VISITING = 1;
@@ -135,9 +135,8 @@ function detectCycles(steps: Map<string, Step>): void {
         state.set(node, VISITING);
       }
       const step = steps.get(node)!;
-      const deps = [...step.build_depends, ...step.depends];
       let pushed = false;
-      for (const dep of deps) {
+      for (const dep of step.depends) {
         const depState = state.get(dep);
         if (depState === VISITING) {
           const cycle = [...path, dep].join(" -> ");
@@ -179,6 +178,19 @@ function optionalString(
   }
   if (typeof value !== "string") {
     throw new ConfigError(`Step "${step}" key "${key}" must be a string`);
+  }
+  return value;
+}
+
+function optionalBoolean(
+  value: unknown,
+  step: string,
+): boolean | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw new ConfigError(`Step "${step}" key "service" must be true or false`);
   }
   return value;
 }

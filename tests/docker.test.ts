@@ -11,7 +11,7 @@ import type { Step } from "../lib/types.ts";
 
 function step(partial: Partial<Step> & { name: string }): Step {
   return {
-    build_depends: [],
+    service: false,
     depends: [],
     volumes: [],
     ports: [],

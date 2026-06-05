@@ -12,9 +12,17 @@ export interface Step {
   dockerfile?: string;
   /** Image to pull when there is no Dockerfile. */
   image?: string;
-  /** Steps whose image must be built before this step is built. */
-  build_depends: string[];
-  /** Steps that must be built and running before this step runs. */
+  /**
+   * When true, the container runs in the background for as long as at least one
+   * other step still depends on it, then is stopped. When false, the container
+   * runs its command to completion before dependents proceed.
+   */
+  service: boolean;
+  /**
+   * Steps that must be ready before this step runs. A dependency that is a
+   * service must be running; a dependency that is not a service must have
+   * completed.
+   */
   depends: string[];
   /** Command to run inside the container. */
   command?: string;

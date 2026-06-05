@@ -9,15 +9,15 @@ build:
 
 database:
     image: postgres
+    service: true
     volumes:
        - "pgdata:/var/lib/postgresql/data"
     ports: 5432
 
 test:
     dockerfile: ./Dockerfile.test
-    build_depends:
-      - build
     depends:
+      - build
       - database
     command: runtests
 `;
@@ -30,17 +30,34 @@ test("parses the README example into normalised steps", () => {
   const build = config.steps.get("build")!;
   assert.equal(build.dockerfile, "./Dockerfile.build");
   assert.equal(build.image, undefined);
-  assert.deepEqual(build.build_depends, []);
+  assert.equal(build.service, false);
+  assert.deepEqual(build.depends, []);
 
   const database = config.steps.get("database")!;
   assert.equal(database.image, "postgres");
+  assert.equal(database.service, true);
   assert.deepEqual(database.volumes, ["pgdata:/var/lib/postgresql/data"]);
   assert.deepEqual(database.ports, [5432]);
 
   const t = config.steps.get("test")!;
-  assert.deepEqual(t.build_depends, ["build"]);
-  assert.deepEqual(t.depends, ["database"]);
+  assert.equal(t.service, false);
+  assert.deepEqual(t.depends, ["build", "database"]);
   assert.equal(t.command, "runtests");
+});
+
+test("service defaults to false and rejects non-boolean values", () => {
+  assert.equal(parseConfig("a:\n  image: x", "/w").steps.get("a")!.service, false);
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  service: yes", "/w"),
+    /must be true or false/,
+  );
+});
+
+test("build_depends is no longer a recognised key", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  build_depends: b\nb:\n  image: y", "/w"),
+    /unknown key "build_depends"/,
+  );
 });
 
 test("rejects empty config", () => {
@@ -105,7 +122,7 @@ a:
   image: x
 b:
   image: y
-  build_depends: a
+  depends: a
 c:
   image: z
   depends:

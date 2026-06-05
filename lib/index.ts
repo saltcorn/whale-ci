@@ -8,6 +8,6 @@ export {
 } from "./docker.ts";
 export type { DockerClient, RunOptions } from "./docker.ts";
 export { prerequisites, runScheduled } from "./schedule.ts";
-export { runPipeline, serviceSteps } from "./runner.ts";
+export { dependentsOf, runPipeline } from "./runner.ts";
 export type { RunnerOptions } from "./runner.ts";
 export { type Config, ConfigError, type Step } from "./types.ts";
