@@ -325,6 +325,29 @@ test("ready_on must be a string", () => {
   );
 });
 
+test("delay is parsed as a number of seconds and defaults to undefined", () => {
+  const withDelay = parseConfig("a:\n  image: x\n  delay: 5", "/w").steps.get("a")!;
+  assert.equal(withDelay.delay, 5);
+  const without = parseConfig("a:\n  image: x", "/w").steps.get("a")!;
+  assert.equal(without.delay, undefined);
+});
+
+test("delay accepts a fractional value", () => {
+  const a = parseConfig("a:\n  image: x\n  delay: 0.5", "/w").steps.get("a")!;
+  assert.equal(a.delay, 0.5);
+});
+
+test("delay rejects negative and non-numeric values", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  delay: -1", "/w"),
+    /key "delay" must be a non-negative number/,
+  );
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  delay: soon", "/w"),
+    /key "delay" must be a non-negative number/,
+  );
+});
+
 test("normalises a single port and a list of ports", () => {
   const single = parseConfig("a:\n  image: x\n  ports: 80", "/w").steps.get("a")!;
   assert.deepEqual(single.ports, [80]);

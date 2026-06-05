@@ -2,6 +2,7 @@ import {
   CliDockerClient,
   type DockerClient,
   imageTag,
+  type LogFollower,
   type OutputSink,
   type RunOptions,
   splitCommand,
@@ -22,6 +23,8 @@ export interface RunnerOptions {
    * docker streams straight to the terminal and `StepReport.output` is empty.
    */
   captureOutput?: boolean;
+  /** Sleep for a number of milliseconds; defaults to a real timer. Injectable for tests. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** Outcome of a whole pipeline run. */
@@ -65,6 +68,8 @@ export async function runPipeline(
   const network = options.network ?? `dockerci-${process.pid}-${Date.now()}`;
   const log = options.log ?? ((message: string) => console.error(message));
   const capture = options.captureOutput ?? false;
+  const sleep = options.sleep ??
+    ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
   const dependents = dependentsOf(config);
   // For each service, how many dependents have not finished yet.
@@ -75,6 +80,9 @@ export async function runPipeline(
 
   const started = new Set<string>();
   const stopped = new Set<string>();
+  // Live log followers for running services, so their output streams as it
+  // happens rather than being dumped when the service is stopped.
+  const followers = new Map<string, LogFollower>();
   let ok = true;
 
   // One record per step, created up front so the report keeps config order.
@@ -188,12 +196,16 @@ export async function runPipeline(
     }
   };
 
-  /** Stop a running service, capturing its logs and recording when it ended. */
+  /** Stop a running service, draining its live log follower and recording when it ended. */
   const stopService = async (name: string): Promise<void> => {
-    if (capture) {
-      await docker.logs(containerName(name), sinkFor(name));
-    }
+    // Remove the container first so its log stream reaches EOF, then let the
+    // follower drain the last of the output before we record the end time.
     await docker.stop(containerName(name));
+    const follower = followers.get(name);
+    if (follower !== undefined) {
+      followers.delete(name);
+      await follower.stop();
+    }
     const record = records.get(name)!;
     record.endedAt = Date.now();
   };
@@ -222,23 +234,39 @@ export async function runPipeline(
     const record = records.get(step.name)!;
     record.startedAt = Date.now();
     try {
+      if (
+        step.service && (dependents.get(step.name)?.size ?? 0) === 0
+      ) {
+        log(`Skipping service ${step.name} (not required by any step)`);
+        record.status = "skipped";
+        record.endedAt = record.startedAt;
+        return;
+      }
+
+      if (step.delay !== undefined) {
+        // Wait the configured delay on top of waiting for dependencies.
+        log(`Delaying ${step.name} for ${step.delay}s`);
+        await sleep(step.delay * 1000);
+      }
+
       if (step.service) {
-        if ((dependents.get(step.name)?.size ?? 0) === 0) {
-          log(`Skipping service ${step.name} (not required by any step)`);
-          record.status = "skipped";
-          record.endedAt = record.startedAt;
-          return;
-        }
         await buildOrPull(step);
         log(`Starting service ${step.name}`);
         started.add(step.name);
         // A service has at most one command (enforced at parse time).
         const argv = step.command ? splitCommand(step.command[0]) : undefined;
         await docker.startDetached(optionsFor(step, argv), sinkFor(step.name));
+        // Follow the service's output live so it streams as it happens.
+        const follower = docker.followLogs(
+          containerName(step.name),
+          sinkFor(step.name),
+          step.readyOn,
+        );
+        followers.set(step.name, follower);
         if (step.readyOn !== undefined) {
           // Hold dependents until the service announces it is ready.
           log(`Waiting for ${step.name} to be ready (ready_on: ${step.readyOn})`);
-          await docker.waitForReady(containerName(step.name), step.readyOn);
+          await follower.ready;
           log(`Service ${step.name} is ready`);
         }
         // A service keeps running; it is stopped (and its end recorded) by

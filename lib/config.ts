@@ -14,6 +14,7 @@ const KNOWN_KEYS = new Set([
   "ports",
   "disable",
   "ready_on",
+  "delay",
 ]);
 
 /** Read, parse and validate a config file, returning the structured Config. */
@@ -126,6 +127,7 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     environment: envList(raw["environment"], name),
     ports: portList(raw["ports"], name),
     readyOn,
+    delay: optionalDelay(raw["delay"], name),
   };
 }
 
@@ -338,6 +340,19 @@ function envValue(value: unknown, step: string, key: string): string {
   throw new ConfigError(
     `Step "${step}" environment value for "${key}" must be a string, number or boolean`,
   );
+}
+
+/** Accept an optional non-negative number of seconds to delay a step. */
+function optionalDelay(value: unknown, step: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new ConfigError(
+      `Step "${step}" key "delay" must be a non-negative number`,
+    );
+  }
+  return value;
 }
 
 /** Accept a single port number or a list of them. */

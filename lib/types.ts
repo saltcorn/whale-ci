@@ -47,6 +47,11 @@ export interface Step {
    * Only valid on a service step.
    */
   readyOn?: string;
+  /**
+   * Extra time to wait, in seconds, after all dependencies are ready and before
+   * the step runs. Undefined means no extra delay.
+   */
+  delay?: number;
 }
 
 /** A fully parsed and validated configuration file. */

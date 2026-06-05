@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseConfig } from "../lib/config.ts";
-import type { DockerClient, OutputSink, RunOptions } from "../lib/docker.ts";
+import type {
+  DockerClient,
+  LogFollower,
+  OutputSink,
+  RunOptions,
+} from "../lib/docker.ts";
 import { dependentsOf, runPipeline } from "../lib/runner.ts";
 
 interface Event {
@@ -54,15 +59,27 @@ class FakeDocker implements DockerClient {
     this.events.push({ kind: "startDetached", arg: options.alias });
     sink?.(`started ${options.alias}\n`);
   }
-  async logs(name: string, sink?: OutputSink): Promise<void> {
-    this.events.push({ kind: "logs", arg: name });
+  followLogs(
+    name: string,
+    sink?: OutputSink,
+    readyNeedle?: string,
+  ): LogFollower {
+    this.events.push({ kind: "followLogs", arg: name });
+    // Simulate live output streaming as the follower attaches.
     sink?.(`logs of ${name}\n`);
-  }
-  async waitForReady(name: string, _needle: string): Promise<void> {
-    this.events.push({ kind: "waitForReady", arg: name });
-    if (this.readyFail.has(name)) {
-      throw new Error(`never ready: ${name}`);
+    let ready: Promise<void>;
+    if (readyNeedle !== undefined && this.readyFail.has(name)) {
+      ready = Promise.reject(new Error(`never ready: ${name}`));
+      ready.catch(() => {}); // avoid unhandled rejection when not awaited
+    } else {
+      ready = Promise.resolve();
     }
+    return {
+      ready,
+      stop: async () => {
+        this.events.push({ kind: "stopLogs", arg: name });
+      },
+    };
   }
   async commit(container: string, tag: string): Promise<void> {
     this.events.push({ kind: "commit", arg: `${container}->${tag}` });
@@ -224,13 +241,14 @@ test("a dependent waits for the service's ready_on marker before starting", asyn
   });
 
   assert.equal(ok, true);
-  // The service is started, then we wait for readiness, then the dependent runs.
+  // The service is started, we follow its logs for the marker, then the
+  // dependent runs only once readiness has been reached.
   const start = docker.at("startDetached:db");
-  const ready = docker.at("waitForReady:net-db");
+  const follow = docker.at("followLogs:net-db");
   const runApp = docker.at("run:app");
-  assert.ok(start !== -1 && ready !== -1 && runApp !== -1);
-  assert.ok(start < ready, "service starts before we wait for readiness");
-  assert.ok(ready < runApp, "dependent runs only after readiness");
+  assert.ok(start !== -1 && follow !== -1 && runApp !== -1);
+  assert.ok(start < follow, "service starts before we follow its output");
+  assert.ok(follow < runApp, "dependent runs only after readiness");
 });
 
 test("a service that never reaches its ready_on marker fails the pipeline", async () => {
@@ -248,11 +266,76 @@ test("a service that never reaches its ready_on marker fails the pipeline", asyn
   assert.equal(steps.find((s) => s.name === "db")!.status, "failure");
 });
 
-test("a service without ready_on is not waited on", async () => {
-  // The README example's `database` service has no ready_on.
+test("a service's output is followed live, not dumped at the end", async () => {
+  // The README example's `database` service has no ready_on, but its logs are
+  // still followed live (so output streams as it happens) and the follow starts
+  // right after the service is started, well before it is stopped.
   const docker = new FakeDocker();
   await runPipeline(load(), { docker, ...base });
-  assert.deepEqual(docker.kinds("waitForReady"), []);
+  assert.deepEqual(docker.kinds("followLogs"), ["net-database"]);
+  assert.ok(
+    docker.at("followLogs:net-database") < docker.at("stop:net-database"),
+    "logs are followed while the service runs, not only when it stops",
+  );
+});
+
+test("delay waits the configured seconds before the step runs", async () => {
+  const config = parseConfig("job:\n  image: alpine\n  command: go\n  delay: 3", "/work");
+  const docker = new FakeDocker();
+  const slept: number[] = [];
+  const sleep = async (ms: number) => {
+    slept.push(ms);
+    // Record the delay relative to the docker calls made so far.
+    docker.events.push({ kind: "sleep", arg: String(ms) });
+  };
+  const { ok } = await runPipeline(config, { docker, ...base, sleep });
+
+  assert.equal(ok, true);
+  // 3 seconds, expressed in milliseconds.
+  assert.deepEqual(slept, [3000]);
+  // The wait happens before the image is pulled and the command runs.
+  assert.ok(docker.at("sleep:3000") < docker.at("pull:alpine"));
+  assert.ok(docker.at("sleep:3000") < docker.at("run:job"));
+});
+
+test("steps without delay never sleep", async () => {
+  const docker = new FakeDocker();
+  const slept: number[] = [];
+  await runPipeline(load(), {
+    docker,
+    ...base,
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+  assert.deepEqual(slept, []);
+});
+
+test("a skipped service does not incur its delay", async () => {
+  const config = parseConfig(
+    `
+orphan:
+  image: redis
+  service: true
+  delay: 10
+job:
+  image: alpine
+  command: go
+`,
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const slept: number[] = [];
+  const { steps } = await runPipeline(config, {
+    docker,
+    ...base,
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+  // The orphan service is skipped, so its delay is never waited.
+  assert.deepEqual(slept, []);
+  assert.equal(steps.find((s) => s.name === "orphan")!.status, "skipped");
 });
 
 test("non-zero job exit code fails the pipeline but still cleans up", async () => {
@@ -422,7 +505,8 @@ test("failed step is reported as failure", async () => {
 test("output is not captured unless requested", async () => {
   const docker = new FakeDocker();
   const { steps } = await runPipeline(load(), { docker, ...base });
-  // No logs fetched and output buffers stay empty when not capturing.
-  assert.deepEqual(docker.kinds("logs"), []);
+  // Logs are still followed live (streamed to the terminal), but with no sink
+  // nothing is captured into the report.
+  assert.deepEqual(docker.kinds("followLogs"), ["net-database"]);
   assert.ok(steps.every((s) => s.output === ""));
 });

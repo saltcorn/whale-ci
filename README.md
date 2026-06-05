@@ -62,6 +62,8 @@ The valid keys in each section are:
   database printing its "ready to accept connections" banner). If the service
   stops before the string appears, the step fails. The string is matched against
   the service's combined stdout and stderr.
+* delay: a non-negative number of seconds. The step waits this long after all of
+  its dependencies are ready, and before it runs.
 
 # Command-line interface
 

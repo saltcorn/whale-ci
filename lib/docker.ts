@@ -32,6 +32,17 @@ export interface RunOptions {
  */
 export type OutputSink = (chunk: string) => void;
 
+/** Handle for a live log follower started by {@link DockerClient.followLogs}. */
+export interface LogFollower {
+  /**
+   * Resolves once the readiness marker has appeared (immediately when no marker
+   * was requested); rejects if the container's output ends before it appears.
+   */
+  ready: Promise<void>;
+  /** Stop following and resolve once the follower has drained and exited. */
+  stop(): Promise<void>;
+}
+
 /**
  * The docker operations the runner needs. Abstracted behind an interface so
  * the orchestration can be tested without a real docker daemon.
@@ -55,13 +66,17 @@ export interface DockerClient {
   run(options: RunOptions, sink?: OutputSink): Promise<number>;
   /** Start a container detached, resolving once it is running. */
   startDetached(options: RunOptions, sink?: OutputSink): Promise<void>;
-  /** Append a container's logs to the sink; best effort, never rejects. */
-  logs(name: string, sink?: OutputSink): Promise<void>;
   /**
-   * Follow a container's output until `needle` appears in it, then resolve.
-   * Rejects if the container's output ends (it stopped) before `needle` appears.
+   * Start following a container's output live, streaming each chunk to the
+   * terminal and (if given) the sink as it arrives — so a service's output is
+   * not deferred until the step ends. When `readyNeedle` is supplied the
+   * returned handle's `ready` promise resolves when that string appears.
    */
-  waitForReady(name: string, needle: string): Promise<void>;
+  followLogs(
+    name: string,
+    sink?: OutputSink,
+    readyNeedle?: string,
+  ): LogFollower;
   /** Commit a stopped container's filesystem to a new image tag. */
   commit(container: string, tag: string): Promise<void>;
   /** Remove an image by tag; never rejects. */
@@ -166,60 +181,73 @@ export class CliDockerClient implements DockerClient {
     await this.#exec(runArgs(options, true), { sink });
   }
 
-  async logs(name: string, sink?: OutputSink): Promise<void> {
-    try {
-      await this.#exec(["logs", name], { sink, quiet: sink === undefined });
-    } catch {
-      // Best effort; a container may already be gone.
-    }
-  }
-
   /**
    * Follow `docker logs -f` (which replays existing output before following, so
-   * a marker printed before we attach is not missed) and resolve as soon as
-   * `needle` is seen. If the container stops first the log stream ends and we
-   * reject, so a service that dies before signalling readiness fails the step.
+   * nothing printed before we attach is missed) and stream every chunk straight
+   * to the terminal and the sink as it arrives. When `readyNeedle` is set,
+   * `ready` resolves the moment it appears; if the container stops first the
+   * stream ends and `ready` rejects, so a service that dies before signalling
+   * readiness fails the step.
    */
-  waitForReady(name: string, needle: string): Promise<void> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn(this.#docker, ["logs", "-f", name], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let settled = false;
-      let buffer = "";
-      const scan = (chunk: Buffer): void => {
-        if (settled) return;
-        buffer += chunk.toString();
-        if (buffer.includes(needle)) {
-          settled = true;
-          child.kill();
-          resolvePromise();
-          return;
-        }
+  followLogs(
+    name: string,
+    sink?: OutputSink,
+    readyNeedle?: string,
+  ): LogFollower {
+    const child = spawn(this.#docker, ["logs", "-f", name], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let resolveReady!: () => void;
+    let rejectReady!: (err: unknown) => void;
+    const ready = new Promise<void>((res, rej) => {
+      resolveReady = res;
+      rejectReady = rej;
+    });
+    let readySettled = readyNeedle === undefined;
+    if (readySettled) resolveReady();
+
+    let buffer = "";
+    const onChunk = (chunk: Buffer, out: NodeJS.WriteStream): void => {
+      const text = chunk.toString();
+      out.write(text);
+      sink?.(text);
+      if (readySettled) return;
+      buffer += text;
+      if (buffer.includes(readyNeedle!)) {
+        readySettled = true;
+        resolveReady();
+      } else if (buffer.length > readyNeedle!.length) {
         // Keep a tail long enough to catch a needle split across two chunks.
-        if (buffer.length > needle.length) {
-          buffer = buffer.slice(-needle.length);
-        }
-      };
-      child.stdout?.on("data", scan);
-      child.stderr?.on("data", scan);
-      child.on("error", (err) => {
-        if (!settled) {
-          settled = true;
-          reject(err);
-        }
-      });
-      child.on("close", () => {
-        if (!settled) {
-          settled = true;
-          reject(
+        buffer = buffer.slice(-readyNeedle!.length);
+      }
+    };
+    child.stdout?.on("data", (c: Buffer) => onChunk(c, process.stdout));
+    child.stderr?.on("data", (c: Buffer) => onChunk(c, process.stderr));
+
+    const done = new Promise<void>((resolveDone) => {
+      const finish = (): void => {
+        if (!readySettled) {
+          readySettled = true;
+          rejectReady(
             new Error(
-              `Container ${name} stopped before "${needle}" appeared in its output`,
+              `Container ${name} stopped before "${readyNeedle}" appeared in its output`,
             ),
           );
         }
-      });
+        resolveDone();
+      };
+      child.on("error", finish);
+      child.on("close", finish);
     });
+
+    return {
+      ready,
+      stop: async () => {
+        child.kill();
+        await done;
+      },
+    };
   }
 
   async commit(container: string, tag: string): Promise<void> {
