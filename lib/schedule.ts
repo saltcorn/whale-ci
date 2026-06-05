@@ -19,6 +19,7 @@ export function prerequisites(step: Step): string[] {
 export async function runScheduled(
   config: Config,
   process: (step: Step) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const remaining = new Map<string, Set<string>>();
   for (const [name, step] of config.steps) {
@@ -32,6 +33,8 @@ export async function runScheduled(
 
   const launchReady = (): void => {
     if (failure !== undefined) return;
+    // Stop launching new steps once the run has been interrupted.
+    if (signal?.aborted) return;
     for (const [name, deps] of remaining) {
       if (started.has(name)) continue;
       if (deps.size > 0) continue;

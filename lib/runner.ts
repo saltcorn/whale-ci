@@ -25,6 +25,12 @@ export interface RunnerOptions {
   captureOutput?: boolean;
   /** Sleep for a number of milliseconds; defaults to a real timer. Injectable for tests. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Abort signal for interrupting the run (e.g. on Ctrl-C). When it aborts, no
+   * new steps are started and every running container is stopped and the network
+   * removed before the run returns (with `ok: false`).
+   */
+  signal?: AbortSignal;
 }
 
 /** Outcome of a whole pipeline run. */
@@ -83,6 +89,9 @@ export async function runPipeline(
   // Live log followers for running services, so their output streams as it
   // happens rather than being dumped when the service is stopped.
   const followers = new Map<string, LogFollower>();
+  // Names of job containers currently running, so an interrupted run can force
+  // them down (services are tracked via `started`/`stopped`).
+  const liveContainers = new Set<string>();
   let ok = true;
 
   // One record per step, created up front so the report keeps config order.
@@ -135,13 +144,19 @@ export async function runPipeline(
   const runCommands = async (step: Step, commands: string[]): Promise<void> => {
     const sink = sinkFor(step.name);
     if (commands.length === 1) {
-      log(`Running ${step.name}: ${commands[0]}`);
-      const code = await docker.run(
-        optionsFor(step, splitCommand(commands[0])),
-        sink,
-      );
-      if (code !== 0) {
-        throw new Error(`Step "${step.name}" failed with exit code ${code}`);
+      const container = containerName(step.name);
+      liveContainers.add(container);
+      try {
+        log(`Running ${step.name}: ${commands[0]}`);
+        const code = await docker.run(
+          optionsFor(step, splitCommand(commands[0])),
+          sink,
+        );
+        if (code !== 0) {
+          throw new Error(`Step "${step.name}" failed with exit code ${code}`);
+        }
+      } finally {
+        liveContainers.delete(container);
       }
       return;
     }
@@ -152,6 +167,7 @@ export async function runPipeline(
       for (let i = 0; i < commands.length; i++) {
         const container = `${containerName(step.name)}-cmd${i}`;
         const last = i === commands.length - 1;
+        liveContainers.add(container);
         try {
           log(`Running ${step.name}: ${commands[i]}`);
           const code = await docker.run(
@@ -173,6 +189,7 @@ export async function runPipeline(
           }
         } finally {
           await docker.stop(container);
+          liveContainers.delete(container);
         }
       }
     } finally {
@@ -287,21 +304,48 @@ export async function runPipeline(
     }
   };
 
+  // Stop every running container and remove the network. Memoised so the abort
+  // handler and the normal finally share one run, and the finally awaits it even
+  // when the handler started it first.
+  let teardownStarted: Promise<void> | undefined;
+  const teardown = (): Promise<void> => {
+    teardownStarted ??= (async () => {
+      for (const name of started) {
+        if (!stopped.has(name)) {
+          await stopService(name);
+        }
+      }
+      // Force down any job container still running (e.g. an interrupted step).
+      for (const name of [...liveContainers]) {
+        liveContainers.delete(name);
+        await docker.stop(name);
+      }
+      await docker.removeNetwork(network);
+    })();
+    return teardownStarted;
+  };
+
+  const signal = options.signal;
+  const onAbort = (): void => {
+    log("Interrupted; stopping containers...");
+    void teardown();
+  };
+  // On an already-aborted signal this never fires; launchReady's abort check
+  // then skips every step and the finally still tears the network down.
+  signal?.addEventListener("abort", onAbort, { once: true });
+
   await docker.createNetwork(network);
   try {
-    await runScheduled(config, processStep);
+    await runScheduled(config, processStep, signal);
   } catch (err) {
     ok = false;
     log(`Pipeline failed: ${(err as Error).message}`);
   } finally {
-    for (const name of started) {
-      if (!stopped.has(name)) {
-        await stopService(name);
-      }
-    }
-    await docker.removeNetwork(network);
+    await teardown();
+    signal?.removeEventListener("abort", onAbort);
   }
 
+  if (signal?.aborted) ok = false;
   return { ok, steps: toReports(config, records) };
 }
 

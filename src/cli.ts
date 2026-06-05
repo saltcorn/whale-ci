@@ -79,9 +79,33 @@ async function main(argv: string[]): Promise<number> {
 
   try {
     const config = await loadConfig(args.configFile);
-    const result = await runPipeline(config, {
-      captureOutput: args.output !== undefined,
-    });
+
+    // On Ctrl-C, abort the run so every container is stopped before exiting; a
+    // second Ctrl-C force-quits in case teardown itself hangs.
+    const controller = new AbortController();
+    let interrupts = 0;
+    const onSigint = (): void => {
+      interrupts += 1;
+      if (interrupts === 1) {
+        console.error(
+          "\nInterrupted — stopping containers (press Ctrl-C again to force quit)...",
+        );
+        controller.abort();
+      } else {
+        process.exit(130);
+      }
+    };
+    process.on("SIGINT", onSigint);
+
+    let result;
+    try {
+      result = await runPipeline(config, {
+        captureOutput: args.output !== undefined,
+        signal: controller.signal,
+      });
+    } finally {
+      process.removeListener("SIGINT", onSigint);
+    }
 
     if (args.output !== undefined) {
       const html = renderReport(result.steps, {
@@ -92,6 +116,8 @@ async function main(argv: string[]): Promise<number> {
       console.error(`Report written to ${args.output}`);
     }
 
+    // 130 is the conventional exit code for a SIGINT-interrupted process.
+    if (controller.signal.aborted) return 130;
     return result.ok ? 0 : 1;
   } catch (err) {
     if (err instanceof ConfigError) {

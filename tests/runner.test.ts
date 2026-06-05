@@ -27,6 +27,11 @@ class FakeDocker implements DockerClient {
   launched = new Map<string, RunOptions>();
   /** Container names that never reach their ready_on marker. */
   readyFail = new Set<string>();
+  /** Aliases whose `run` blocks until the container is force-stopped. */
+  hangRun = new Set<string>();
+  /** Called with the alias at the start of each `run` (e.g. to fire an interrupt). */
+  onRun?: (alias: string) => void;
+  #pendingRuns = new Map<string, (code: number) => void>();
 
   async createNetwork(name: string): Promise<void> {
     this.events.push({ kind: "createNetwork", arg: name });
@@ -56,6 +61,13 @@ class FakeDocker implements DockerClient {
     this.runImages.push(options.image);
     this.launched.set(options.alias, options);
     sink?.(`output of ${options.alias}\n`);
+    this.onRun?.(options.alias);
+    if (this.hangRun.has(options.alias)) {
+      // Block until `stop` is called for this container (the interrupt path).
+      return await new Promise<number>((resolve) => {
+        this.#pendingRuns.set(options.name, resolve);
+      });
+    }
     return this.runExitCodes.get(options.alias) ?? 0;
   }
   async startDetached(options: RunOptions, sink?: OutputSink): Promise<void> {
@@ -93,6 +105,11 @@ class FakeDocker implements DockerClient {
   }
   async stop(name: string): Promise<void> {
     this.events.push({ kind: "stop", arg: name });
+    const resolve = this.#pendingRuns.get(name);
+    if (resolve !== undefined) {
+      this.#pendingRuns.delete(name);
+      resolve(130);
+    }
   }
 
   kinds(kind: string): string[] {
@@ -369,6 +386,55 @@ job:
   // The orphan service is skipped, so its delay is never waited.
   assert.deepEqual(slept, []);
   assert.equal(steps.find((s) => s.name === "orphan")!.status, "skipped");
+});
+
+test("aborting stops running containers and removes the network before returning", async () => {
+  const config = parseConfig(
+    `
+db:
+  image: postgres
+  service: true
+app:
+  image: alpine
+  depends: db
+  command: serve
+`,
+    "/work",
+  );
+  const controller = new AbortController();
+  const docker = new FakeDocker();
+  // The app job runs indefinitely; fire the "Ctrl-C" once it is in flight.
+  docker.hangRun.add("app");
+  docker.onRun = (alias) => {
+    if (alias === "app") queueMicrotask(() => controller.abort());
+  };
+
+  const { ok, steps } = await runPipeline(config, {
+    docker,
+    ...base,
+    signal: controller.signal,
+  });
+
+  assert.equal(ok, false);
+  // Both the running service and the interrupted job are stopped...
+  assert.ok(docker.kinds("stop").includes("net-db"), "service stopped");
+  assert.ok(docker.kinds("stop").includes("net-app"), "interrupted job stopped");
+  // ...and the network is torn down before the run returns.
+  assert.deepEqual(docker.kinds("removeNetwork"), ["net"]);
+  assert.equal(steps.find((s) => s.name === "app")!.status, "failure");
+});
+
+test("an already-aborted signal stops the run and tears down", async () => {
+  const docker = new FakeDocker();
+  const { ok } = await runPipeline(load(), {
+    docker,
+    ...base,
+    signal: AbortSignal.abort(),
+  });
+  // Nothing runs, but the network is still created and removed cleanly.
+  assert.equal(ok, false);
+  assert.deepEqual(docker.kinds("run"), []);
+  assert.deepEqual(docker.kinds("removeNetwork"), ["net"]);
 });
 
 test("non-zero job exit code fails the pipeline but still cleans up", async () => {
