@@ -282,7 +282,7 @@ export async function runPipeline(
         followers.set(step.name, follower);
         if (step.readyOn !== undefined) {
           // Hold dependents until the service announces it is ready.
-          log(`Waiting for ${step.name} to be ready (ready_on: ${step.readyOn})`);
+          log(`Waiting for ${step.name} to be ready (ready-on: ${step.readyOn})`);
           await follower.ready;
           log(`Service ${step.name} is ready`);
         }

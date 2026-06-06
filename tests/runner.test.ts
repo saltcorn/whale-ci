@@ -25,7 +25,7 @@ class FakeDocker implements DockerClient {
   runImages: string[] = [];
   /** The most recent run/startDetached options for each step alias. */
   launched = new Map<string, RunOptions>();
-  /** Container names that never reach their ready_on marker. */
+  /** Container names that never reach their ready-on marker. */
   readyFail = new Set<string>();
   /** Aliases whose `run` blocks until the container is force-stopped. */
   hangRun = new Set<string>();
@@ -247,14 +247,14 @@ const READY_CONFIG = `
 db:
   image: postgres
   service: true
-  ready_on: ready to accept connections
+  ready-on: ready to accept connections
 app:
   image: alpine
   depends: db
   command: run
 `;
 
-test("a dependent waits for the service's ready_on marker before starting", async () => {
+test("a dependent waits for the service's ready-on marker before starting", async () => {
   const docker = new FakeDocker();
   const { ok } = await runPipeline(parseConfig(READY_CONFIG, "/work"), {
     docker,
@@ -301,7 +301,7 @@ app:
   assert.deepEqual(app.environment, ["DB_HOST=database"]);
 });
 
-test("a service that never reaches its ready_on marker fails the pipeline", async () => {
+test("a service that never reaches its ready-on marker fails the pipeline", async () => {
   const docker = new FakeDocker();
   docker.readyFail.add("net-db");
   const { ok, steps } = await runPipeline(parseConfig(READY_CONFIG, "/work"), {
@@ -317,7 +317,7 @@ test("a service that never reaches its ready_on marker fails the pipeline", asyn
 });
 
 test("a service's output is followed live, not dumped at the end", async () => {
-  // The README example's `database` service has no ready_on, but its logs are
+  // The README example's `database` service has no ready-on, but its logs are
   // still followed live (so output streams as it happens) and the follow starts
   // right after the service is started, well before it is stopped.
   const docker = new FakeDocker();

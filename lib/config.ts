@@ -13,7 +13,7 @@ const KNOWN_KEYS = new Set([
   "environment",
   "ports",
   "disable",
-  "ready_on",
+  "ready-on",
   "delay",
 ]);
 
@@ -110,10 +110,10 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     );
   }
 
-  const readyOn = optionalString(raw["ready_on"], name, "ready_on");
+  const readyOn = optionalString(raw["ready-on"], name, "ready-on");
   if (readyOn !== undefined && !service) {
     throw new ConfigError(
-      `Step "${name}" sets "ready_on" but is not a service; ready_on only applies to services`,
+      `Step "${name}" sets "ready-on" but is not a service; ready-on only applies to services`,
     );
   }
 

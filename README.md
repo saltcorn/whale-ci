@@ -56,7 +56,7 @@ The valid keys in each section are:
 * disable: `true` or `false` (default `false`). When `true` the step is
   completely ignored: it is dropped from the pipeline and is never built, run,
   reported, or available as a dependency of other steps.
-* ready_on: a string (only valid on a service). Any step that depends on this
+* ready-on: a string (only valid on a service). Any step that depends on this
   service is held until this exact string appears in the service's output, so
   you can wait for a slow-starting service to finish booting (for example a
   database printing its "ready to accept connections" banner). If the service
@@ -78,7 +78,7 @@ database:
     service: true
     environment:
        POSTGRES_HOST_AUTH_METHOD: trust
-    ready_on: ready to accept connections
+    ready-on: ready to accept connections
 
 app:
     dockerfile: ./Dockerfile.app
@@ -92,7 +92,7 @@ app:
 
 Inside the `app` container, connecting to host `database` reaches the `database`
 step's container. Use `depends` (and, for services that take a moment to start,
-`ready_on`) so the service is up before the client tries to connect.
+`ready-on`) so the service is up before the client tries to connect.
 
 # Command-line interface
 
