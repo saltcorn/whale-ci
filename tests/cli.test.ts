@@ -26,7 +26,14 @@ test("parses a lone config file", async () => {
   assert.deepEqual(await parseArgs(["ci.yml"]), {
     configFile: "ci.yml",
     output: undefined,
+    serve: false,
   });
+});
+
+test("parses the --serve flag", async () => {
+  assert.equal((await parseArgs(["ci.yml"])).serve, false);
+  assert.equal((await parseArgs(["--serve", "ci.yml"])).serve, true);
+  assert.equal((await parseArgs(["ci.yml", "--serve"])).serve, true);
 });
 
 test("parses output flag in all spellings", async () => {

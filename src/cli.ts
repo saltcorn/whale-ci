@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { binary, command, option, optional, positional, run, string } from "cmd-ts";
+import { binary, command, flag, option, optional, positional, run, string } from "cmd-ts";
 import { loadConfig } from "../lib/config.ts";
+import { CliGitClient } from "../lib/git.ts";
+import { GitHubStatusReporter } from "../lib/github.ts";
 import { renderReport } from "../lib/report.ts";
 import { runPipeline } from "../lib/runner.ts";
+import { CiServer, serverConfigFromEnv, verifyCheckout } from "../lib/server.ts";
 import { ConfigError } from "../lib/types.ts";
 
 /**
@@ -29,13 +32,23 @@ export const app = command({
         "Write a self-contained HTML report (per-step output, pass/fail and " +
         "duration) to this file.",
     }),
+    serve: flag({
+      long: "serve",
+      description:
+        "Run as a CI server: a GitHub push-webhook backend that checks each " +
+        "pushed commit out into its own git worktree and runs the pipeline. " +
+        "Must be run from the root of the git checkout containing the config " +
+        "file. Reads GITHUB_TOKEN, WEBHOOK_SECRET, WORKTREE_ROOT and " +
+        "LISTEN_PORT from the environment.",
+    }),
     configFile: positional({
       type: string,
       displayName: "config.yml",
       description: "Path to the YAML pipeline configuration file.",
     }),
   },
-  handler: ({ output, configFile }) => runCli(configFile, output),
+  handler: ({ output, serve, configFile }) =>
+    serve ? runServe(configFile) : runCli(configFile, output),
 });
 
 /**
@@ -85,6 +98,55 @@ async function runCli(configFile: string, output?: string): Promise<number> {
     // 130 is the conventional exit code for a SIGINT-interrupted process.
     if (controller.signal.aborted) return 130;
     return result.ok ? 0 : 1;
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Run as a GitHub webhook CI server. Validates that the current directory is the
+ * root of a git checkout containing `configFile`, reads its settings from the
+ * environment, and serves until interrupted (Ctrl-C), draining in-flight CI jobs
+ * before returning. Returns the process exit code.
+ */
+async function runServe(configFile: string): Promise<number> {
+  try {
+    const env = serverConfigFromEnv(process.env);
+    const git = new CliGitClient();
+    const repoRoot = await verifyCheckout(git, process.cwd(), configFile);
+
+    // The worktree root must exist before git can add worktrees under it.
+    await mkdir(env.worktreeRoot, { recursive: true });
+
+    const server = new CiServer({
+      repoRoot,
+      configFile,
+      secret: env.webhookSecret,
+      worktreeRoot: env.worktreeRoot,
+      git,
+      status: new GitHubStatusReporter(env.githubToken),
+    });
+
+    await server.listen(env.listenPort);
+    console.error(
+      `dock-ci serving webhooks on port ${env.listenPort} ` +
+        `(checkout ${repoRoot}, worktrees under ${env.worktreeRoot})`,
+    );
+
+    // Run until Ctrl-C, then stop listening and let running jobs finish.
+    await new Promise<void>((resolvePromise) => {
+      const onSigint = (): void => {
+        console.error("\nShutting down; waiting for in-flight CI jobs...");
+        process.removeListener("SIGINT", onSigint);
+        void server.close().then(resolvePromise);
+      };
+      process.on("SIGINT", onSigint);
+    });
+    return 0;
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Error: ${err.message}`);

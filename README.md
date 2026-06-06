@@ -119,3 +119,52 @@ At the end, whether the test succeeded or not, all running containers are stoppe
   the captured build and container-run output.
 
 `npx dock-ci -o report.html ci.yml`
+
+* `--serve`: run as a CI server instead of running once. This starts an HTTP
+  server that acts as the backend for a GitHub push webhook (see below).
+
+`npx dock-ci --serve ci.yml`
+
+# Server mode (GitHub webhook backend)
+
+With `--serve`, dock-ci runs as a long-lived HTTP server that GitHub can call as
+a [push webhook](https://docs.github.com/webhooks). Each accepted push is built
+and tested, and the result is reported back to GitHub as a commit status (so it
+shows up as a check on the commit and pull request).
+
+The command must be run **from the root of a git checkout** that contains the
+named config file; it refuses to start otherwise. Because several pushes (to
+different branches) may be in flight at once, the server never builds in the
+serving checkout itself. Instead, for each push it:
+
+1. verifies the webhook's `X-Hub-Signature-256` against `WEBHOOK_SECRET`;
+2. posts a `pending` commit status;
+3. fetches the pushed branch and adds a detached **git worktree**, under
+   `WORKTREE_ROOT`, checked out at the exact pushed commit;
+4. loads the config file from that worktree and runs the pipeline there;
+5. posts a `success` or `failure` (or `error`) commit status; and
+6. removes the worktree.
+
+Using a separate worktree per push lets pushes to different branches be tested
+concurrently without interfering with each other.
+
+The server is configured entirely through environment variables:
+
+* `GITHUB_TOKEN`: token used to post commit statuses to the GitHub API.
+* `WEBHOOK_SECRET`: shared secret used to verify webhook signatures. Requests
+  with a missing or invalid signature are rejected with `401`.
+* `WORKTREE_ROOT`: directory under which the per-push git worktrees are created
+  (created if it does not exist).
+* `LISTEN_PORT`: TCP port the webhook server listens on.
+
+```sh
+export GITHUB_TOKEN=ghp_...
+export WEBHOOK_SECRET=$(openssl rand -hex 20)
+export WORKTREE_ROOT=/var/tmp/dock-ci
+export LISTEN_PORT=8080
+npx dock-ci --serve ci.yml
+```
+
+`ping` events are answered, non-`push` events are ignored, and branch deletions
+and tag pushes are skipped. Press Ctrl-C to stop the server; it waits for any
+in-flight CI jobs to finish before exiting.
