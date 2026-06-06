@@ -15,6 +15,11 @@ const SECRET = "topsecret";
 class FakeGit implements GitClient {
   readonly calls: string[] = [];
   fetchError: Error | undefined;
+  /** Artificial duration of each git op, so concurrent ops would overlap. */
+  opDelayMs = 0;
+  /** Git ops running right now, and the high-water mark across the run. */
+  inFlight = 0;
+  maxInFlight = 0;
   #root: string | undefined;
 
   constructor(root: string | undefined) {
@@ -25,14 +30,28 @@ class FakeGit implements GitClient {
     return this.#root;
   }
   async fetch(_dir: string, ref: string): Promise<void> {
-    this.calls.push(`fetch ${ref}`);
-    if (this.fetchError) throw this.fetchError;
+    await this.#op(`fetch ${ref}`, this.fetchError);
   }
   async addWorktree(_dir: string, path: string, commit: string): Promise<void> {
-    this.calls.push(`add ${commit} ${path}`);
+    await this.#op(`add ${commit} ${path}`);
   }
   async removeWorktree(_dir: string, path: string): Promise<void> {
-    this.calls.push(`remove ${path}`);
+    await this.#op(`remove ${path}`);
+  }
+
+  /** Record a call and track concurrency, optionally pausing then faulting. */
+  async #op(label: string, fault?: Error): Promise<void> {
+    this.calls.push(label);
+    this.inFlight++;
+    this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+    try {
+      if (this.opDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, this.opDelayMs));
+      }
+      if (fault) throw fault;
+    } finally {
+      this.inFlight--;
+    }
   }
 }
 
@@ -271,6 +290,38 @@ test("concurrent pushes get distinct worktrees", async () => {
     assert.notEqual(runDirs[0], runDirs[1]);
     release();
     await server.drain();
+  } finally {
+    await server.close();
+  }
+});
+
+test("git operations on the shared checkout never overlap across concurrent pushes", async () => {
+  const git = new FakeGit("/repo");
+  // Stretch each git op so two unsynchronised jobs would overlap in time.
+  git.opDelayMs = 20;
+  // Hold both pipelines in flight at once so their git ops have the chance to.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const { server } = await startServer(async () => {
+    await gate;
+    return true;
+  }, git);
+  try {
+    await postWebhook(server, "push", PUSH);
+    await postWebhook(server, "push", {
+      ...PUSH,
+      ref: "refs/heads/other",
+      after: "f00df00df00d",
+    });
+    // Let both jobs work through fetch + add and park in the blocked run().
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    await server.drain();
+    // The lock kept fetch/add/remove strictly one-at-a-time across both jobs.
+    assert.equal(git.maxInFlight, 1);
+    // Both jobs still completed their full git sequence.
+    assert.equal(git.calls.filter((c) => c.startsWith("fetch ")).length, 2);
+    assert.equal(git.calls.filter((c) => c.startsWith("remove ")).length, 2);
   } finally {
     await server.close();
   }

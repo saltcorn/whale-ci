@@ -123,6 +123,12 @@ export class CiServer {
   readonly #server: Server;
   /** In-flight CI jobs, tracked so shutdown can wait for them to finish. */
   readonly #jobs = new Set<Promise<void>>();
+  /**
+   * Serialises git operations against the shared checkout. Concurrent fetches
+   * and worktree add/removes on one repo contend on git's ref/packed-refs
+   * lockfiles and can spuriously fail; this chain lets only one run at a time.
+   */
+  #gitLock: Promise<unknown> = Promise.resolve();
   /** Monotonic counter making each worktree directory name unique. */
   #counter = 0;
 
@@ -239,9 +245,13 @@ export class CiServer {
 
     let created = false;
     try {
-      await this.#git.fetch(this.#repoRoot, branch);
-      await this.#git.addWorktree(this.#repoRoot, worktreeDir, sha);
-      created = true;
+      // Fetch and check out under the git lock; the pipeline itself runs outside
+      // it so independent jobs still build concurrently in their own worktrees.
+      await this.#withGitLock(async () => {
+        await this.#git.fetch(this.#repoRoot, branch);
+        await this.#git.addWorktree(this.#repoRoot, worktreeDir, sha);
+        created = true;
+      });
 
       const ok = await this.#run(worktreeDir);
       this.#log(`CI ${ok ? "passed" : "failed"}: ${repo} ${branch}@${short}`);
@@ -257,9 +267,25 @@ export class CiServer {
       await this.#report(repo, sha, "error", message);
     } finally {
       if (created) {
-        await this.#git.removeWorktree(this.#repoRoot, worktreeDir);
+        await this.#withGitLock(() =>
+          this.#git.removeWorktree(this.#repoRoot, worktreeDir)
+        );
       }
     }
+  }
+
+  /**
+   * Run `fn` with exclusive access to the shared checkout, queued behind any
+   * git operation already in flight. The chain advances regardless of whether
+   * `fn` resolves or rejects, so one failed job never wedges later ones.
+   */
+  #withGitLock<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.#gitLock.then(fn, fn);
+    this.#gitLock = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   /** Post a commit status, logging (not throwing) if GitHub rejects it. */
