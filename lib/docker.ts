@@ -97,10 +97,46 @@ export function imageTag(step: Step): string {
   return `dockerci/${step.name}:latest`;
 }
 
-/** Split a `command:` string into argv. Empty / missing -> undefined. */
+/**
+ * Split a `command:` string into argv, honouring shell-style quoting so that
+ * arguments containing spaces (e.g. `--command='create extension "x";'`) stay
+ * intact. Single quotes are literal, double quotes allow backslash escapes, and
+ * a bare backslash escapes the next character. Empty / missing -> undefined.
+ */
 export function splitCommand(command: string | undefined): string[] | undefined {
   if (command === undefined) return undefined;
-  const parts = command.trim().split(/\s+/).filter((p) => p.length > 0);
+  const parts: string[] = [];
+  let current = "";
+  let hasToken = false;
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = undefined;
+      else current += ch;
+    } else if (quote === '"') {
+      if (ch === '"') quote = undefined;
+      else if (ch === "\\" && i + 1 < command.length) current += command[++i]!;
+      else current += ch;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      hasToken = true;
+    } else if (ch === "\\" && i + 1 < command.length) {
+      current += command[++i]!;
+      hasToken = true;
+    } else if (/\s/.test(ch)) {
+      if (hasToken) parts.push(current);
+      current = "";
+      hasToken = false;
+    } else {
+      current += ch;
+      hasToken = true;
+    }
+  }
+  if (quote !== undefined) {
+    throw new Error(`Unterminated ${quote === "'" ? "single" : "double"} quote in command: ${command}`);
+  }
+  if (hasToken) parts.push(current);
   return parts.length > 0 ? parts : undefined;
 }
 

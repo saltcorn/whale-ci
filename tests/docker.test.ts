@@ -41,6 +41,17 @@ test("splitCommand splits on whitespace and handles empties", () => {
   assert.equal(splitCommand("   "), undefined);
 });
 
+test("splitCommand honours shell-style quoting", () => {
+  assert.deepEqual(
+    splitCommand(`psql -d saltcorn_test --command='create extension "uuid-ossp";'`),
+    ["psql", "-d", "saltcorn_test", `--command=create extension "uuid-ossp";`],
+  );
+  assert.deepEqual(splitCommand(`echo "a b" 'c d'`), ["echo", "a b", "c d"]);
+  assert.deepEqual(splitCommand(`a\\ b`), ["a b"]);
+  assert.deepEqual(splitCommand(`""`), [""]);
+  assert.throws(() => splitCommand(`echo "unterminated`), /Unterminated double quote/);
+});
+
 test("buildArgs constructs a docker build invocation", () => {
   assert.deepEqual(buildArgs("dockerci/test:latest", "/w/D.test", "/w"), [
     "build",
