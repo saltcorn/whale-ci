@@ -1,37 +1,59 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseArgs } from "../src/cli.ts";
+import { parse } from "cmd-ts";
+import { app } from "../src/cli.ts";
 
-test("parses a lone config file", () => {
-  assert.deepEqual(parseArgs(["ci.yml"]), { help: false, configFile: "ci.yml" });
+/**
+ * Parse argv with the cmd-ts command without running the handler, returning the
+ * decoded `{ output, configFile }` object on success.
+ */
+async function parseArgs(args: string[]) {
+  const result = await parse(app, args);
+  assert.equal(result._tag, "ok", `expected a successful parse of ${JSON.stringify(args)}`);
+  return (result as Extract<typeof result, { _tag: "ok" }>).value;
+}
+
+/** The concatenated error messages from a failed parse of `args`. */
+async function parseError(args: string[]): Promise<string> {
+  const result = await parse(app, args);
+  assert.equal(result._tag, "error", `expected a failed parse of ${JSON.stringify(args)}`);
+  return (result as Extract<typeof result, { _tag: "error" }>).error.errors
+    .map((e) => e.message)
+    .join("\n");
+}
+
+test("parses a lone config file", async () => {
+  assert.deepEqual(await parseArgs(["ci.yml"]), {
+    configFile: "ci.yml",
+    output: undefined,
+  });
 });
 
-test("recognises --help and -h", () => {
-  assert.equal(parseArgs(["--help"]).help, true);
-  assert.equal(parseArgs(["-h"]).help, true);
+test("parses output flag in all spellings", async () => {
+  assert.equal((await parseArgs(["-o", "r.html", "ci.yml"])).output, "r.html");
+  assert.equal((await parseArgs(["--output", "r.html", "ci.yml"])).output, "r.html");
+  assert.equal((await parseArgs(["--output=r.html", "ci.yml"])).output, "r.html");
+  assert.equal((await parseArgs(["-o=r.html", "ci.yml"])).output, "r.html");
 });
 
-test("parses output flag in all spellings", () => {
-  assert.equal(parseArgs(["-o", "r.html", "ci.yml"]).output, "r.html");
-  assert.equal(parseArgs(["--output", "r.html", "ci.yml"]).output, "r.html");
-  assert.equal(parseArgs(["--output=r.html", "ci.yml"]).output, "r.html");
-  assert.equal(parseArgs(["-or.html", "ci.yml"]).output, "r.html");
-});
-
-test("output flag and config can appear in any order", () => {
-  const parsed = parseArgs(["ci.yml", "-o", "r.html"]);
+test("output flag and config can appear in any order", async () => {
+  const parsed = await parseArgs(["ci.yml", "-o", "r.html"]);
   assert.equal(parsed.configFile, "ci.yml");
   assert.equal(parsed.output, "r.html");
 });
 
-test("missing output value is an error", () => {
-  assert.match(parseArgs(["-o"]).error!, /Missing value/);
+test("a missing config file is an error", async () => {
+  assert.match(await parseError([]), /config\.yml/);
 });
 
-test("unknown option is an error", () => {
-  assert.match(parseArgs(["--bogus", "ci.yml"]).error!, /Unknown option/);
+test("a missing output value is an error", async () => {
+  assert.notEqual((await parse(app, ["-o"]))._tag, "ok");
 });
 
-test("a second positional argument is an error", () => {
-  assert.match(parseArgs(["a.yml", "b.yml"]).error!, /single config file/);
+test("an unknown option is an error", async () => {
+  assert.match(await parseError(["--bogus", "ci.yml"]), /[Uu]nknown/);
+});
+
+test("a second positional argument is an error", async () => {
+  assert.match(await parseError(["a.yml", "b.yml"]), /[Uu]nknown/);
 });

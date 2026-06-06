@@ -2,83 +2,49 @@
 import { realpathSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { binary, command, option, optional, positional, run, string } from "cmd-ts";
 import { loadConfig } from "../lib/config.ts";
 import { renderReport } from "../lib/report.ts";
 import { runPipeline } from "../lib/runner.ts";
 import { ConfigError } from "../lib/types.ts";
 
-const HELP = `dock-ci - continuous integration with linked docker containers
+/**
+ * The dock-ci command. cmd-ts handles `--help`/`-h` and argument validation
+ * (missing config file, unknown options) for us, exiting with the right code
+ * and message. The handler runs the pipeline and returns the process exit code.
+ */
+export const app = command({
+  name: "dock-ci",
+  description:
+    "Continuous integration with linked docker containers. Builds the images " +
+    "described by the YAML config (in parallel where dependencies allow), runs " +
+    "each step's command, and stops every container when the run finishes. " +
+    "Exits non-zero if any build or command fails.",
+  args: {
+    output: option({
+      type: optional(string),
+      long: "output",
+      short: "o",
+      description:
+        "Write a self-contained HTML report (per-step output, pass/fail and " +
+        "duration) to this file.",
+    }),
+    configFile: positional({
+      type: string,
+      displayName: "config.yml",
+      description: "Path to the YAML pipeline configuration file.",
+    }),
+  },
+  handler: ({ output, configFile }) => runCli(configFile, output),
+});
 
-Usage:
-  npx dock-ci [options] <config.yml>
-
-Options:
-  -o, --output <file>   Write an HTML report of every step (build output,
-                        pass/fail and duration) to <file>.
-  -h, --help            Show this help.
-
-Runs the CI pipeline described by the YAML config file. Each section defines a
-container built from a Dockerfile or pulled by image name. Images are built in
-parallel where dependencies allow; if any build or command fails the run exits
-with code 1. All started containers are stopped when the run finishes.`;
-
-interface ParsedArgs {
-  help: boolean;
-  output?: string;
-  configFile?: string;
-  error?: string;
-}
-
-/** Parse argv into the config file and options. */
-export function parseArgs(args: string[]): ParsedArgs {
-  const parsed: ParsedArgs = { help: false };
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!;
-    if (arg === "--help" || arg === "-h") {
-      parsed.help = true;
-    } else if (arg === "-o" || arg === "--output") {
-      const value = args[++i];
-      if (value === undefined) {
-        return { ...parsed, error: `Missing value for ${arg}` };
-      }
-      parsed.output = value;
-    } else if (arg.startsWith("--output=")) {
-      parsed.output = arg.slice("--output=".length);
-    } else if (arg.startsWith("-o") && arg.length > 2) {
-      parsed.output = arg.slice(2);
-    } else if (arg.startsWith("-")) {
-      return { ...parsed, error: `Unknown option: ${arg}` };
-    } else if (parsed.configFile === undefined) {
-      parsed.configFile = arg;
-    } else {
-      return { ...parsed, error: "Expected a single config file argument" };
-    }
-  }
-
-  return parsed;
-}
-
-async function main(argv: string[]): Promise<number> {
-  const args = parseArgs(argv.slice(2));
-
-  if (args.help) {
-    console.log(HELP);
-    return 0;
-  }
-  if (args.error !== undefined) {
-    console.error(`Error: ${args.error}\n`);
-    console.error(HELP);
-    return 1;
-  }
-  if (args.configFile === undefined) {
-    console.error("Error: no config file given\n");
-    console.error(HELP);
-    return 1;
-  }
-
+/**
+ * Load the config, run the pipeline and (optionally) write the HTML report.
+ * Returns the process exit code: 0 on success, 1 on failure, 130 if interrupted.
+ */
+async function runCli(configFile: string, output?: string): Promise<number> {
   try {
-    const config = await loadConfig(args.configFile);
+    const config = await loadConfig(configFile);
 
     // On Ctrl-C, abort the run so every container is stopped before exiting; a
     // second Ctrl-C force-quits in case teardown itself hangs.
@@ -100,20 +66,20 @@ async function main(argv: string[]): Promise<number> {
     let result;
     try {
       result = await runPipeline(config, {
-        captureOutput: args.output !== undefined,
+        captureOutput: output !== undefined,
         signal: controller.signal,
       });
     } finally {
       process.removeListener("SIGINT", onSigint);
     }
 
-    if (args.output !== undefined) {
+    if (output !== undefined) {
       const html = renderReport(result.steps, {
         ok: result.ok,
-        configFile: args.configFile,
+        configFile,
       });
-      await writeFile(args.output, html, "utf8");
-      console.error(`Report written to ${args.output}`);
+      await writeFile(output, html, "utf8");
+      console.error(`Report written to ${output}`);
     }
 
     // 130 is the conventional exit code for a SIGINT-interrupted process.
@@ -145,11 +111,13 @@ function isEntryPoint(): boolean {
 }
 
 // Only run when invoked as the CLI entry point, so the module can also be
-// imported (e.g. by tests) without executing the pipeline.
+// imported (e.g. by tests) without executing the pipeline. cmd-ts's `run`
+// handles `--help` and parse errors by printing and exiting directly; the
+// handler's resolved value is the exit code for a successful parse.
 if (isEntryPoint()) {
-  main(process.argv).then(
-    (code) => {
-      process.exitCode = code;
+  run(binary(app), process.argv).then(
+    async (code) => {
+      process.exitCode = await code;
     },
     (err) => {
       console.error(err);
