@@ -52,6 +52,12 @@ export interface Step {
    * the step runs. Undefined means no extra delay.
    */
   delay?: number;
+  /**
+   * Maximum time, in minutes, the step's execution may take. If the step does
+   * not complete within this many minutes it is aborted and fails. The configured
+   * `delay` does not count against this budget. Undefined means no timeout.
+   */
+  timeoutMinutes?: number;
 }
 
 /** A fully parsed and validated configuration file. */

@@ -64,6 +64,9 @@ The valid keys in each section are:
   the service's combined stdout and stderr.
 * delay: a non-negative number of seconds. The step waits this long after all of
   its dependencies are ready, and before it runs.
+* timeout-minutes: a positive number of minutes. If the step does not complete
+  its execution within this many minutes it is aborted and the step fails. The
+  `delay` does not count against this budget.
 
 # Networking between steps
 

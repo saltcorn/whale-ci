@@ -15,6 +15,7 @@ const KNOWN_KEYS = new Set([
   "disable",
   "ready-on",
   "delay",
+  "timeout-minutes",
 ]);
 
 /** Read, parse and validate a config file, returning the structured Config. */
@@ -128,6 +129,7 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     ports: portList(raw["ports"], name),
     readyOn,
     delay: optionalDelay(raw["delay"], name),
+    timeoutMinutes: optionalTimeoutMinutes(raw["timeout-minutes"], name),
   };
 }
 
@@ -350,6 +352,19 @@ function optionalDelay(value: unknown, step: string): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new ConfigError(
       `Step "${step}" key "delay" must be a non-negative number`,
+    );
+  }
+  return value;
+}
+
+/** Accept an optional positive number of minutes after which a step times out. */
+function optionalTimeoutMinutes(value: unknown, step: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new ConfigError(
+      `Step "${step}" key "timeout-minutes" must be a positive number`,
     );
   }
   return value;

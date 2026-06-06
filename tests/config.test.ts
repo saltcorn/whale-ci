@@ -348,6 +348,35 @@ test("delay rejects negative and non-numeric values", () => {
   );
 });
 
+test("timeout-minutes is parsed as a number and defaults to undefined", () => {
+  const withTimeout = parseConfig("a:\n  image: x\n  timeout-minutes: 5", "/w")
+    .steps.get("a")!;
+  assert.equal(withTimeout.timeoutMinutes, 5);
+  const without = parseConfig("a:\n  image: x", "/w").steps.get("a")!;
+  assert.equal(without.timeoutMinutes, undefined);
+});
+
+test("timeout-minutes accepts a fractional value", () => {
+  const a = parseConfig("a:\n  image: x\n  timeout-minutes: 0.5", "/w")
+    .steps.get("a")!;
+  assert.equal(a.timeoutMinutes, 0.5);
+});
+
+test("timeout-minutes rejects non-positive and non-numeric values", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  timeout-minutes: 0", "/w"),
+    /key "timeout-minutes" must be a positive number/,
+  );
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  timeout-minutes: -1", "/w"),
+    /key "timeout-minutes" must be a positive number/,
+  );
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  timeout-minutes: soon", "/w"),
+    /key "timeout-minutes" must be a positive number/,
+  );
+});
+
 test("normalises a single port and a list of ports", () => {
   const single = parseConfig("a:\n  image: x\n  ports: 80", "/w").steps.get("a")!;
   assert.deepEqual(single.ports, [80]);

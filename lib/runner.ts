@@ -26,6 +26,12 @@ export interface RunnerOptions {
   /** Sleep for a number of milliseconds; defaults to a real timer. Injectable for tests. */
   sleep?: (ms: number) => Promise<void>;
   /**
+   * Schedule `fire` to run after `ms` milliseconds, returning a canceller that
+   * prevents it from firing. Used to enforce per-step timeouts; defaults to
+   * setTimeout/clearTimeout. Injectable for tests.
+   */
+  timer?: (ms: number, fire: () => void) => () => void;
+  /**
    * Abort signal for interrupting the run (e.g. on Ctrl-C). When it aborts, no
    * new steps are started and every running container is stopped and the network
    * removed before the run returns (with `ok: false`).
@@ -76,6 +82,11 @@ export async function runPipeline(
   const capture = options.captureOutput ?? false;
   const sleep = options.sleep ??
     ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const timer = options.timer ??
+    ((ms: number, fire: () => void) => {
+      const handle = setTimeout(fire, ms);
+      return () => clearTimeout(handle);
+    });
 
   const dependents = dependentsOf(config);
   // For each service, how many dependents have not finished yet.
@@ -247,6 +258,37 @@ export async function runPipeline(
     }
   };
 
+  /**
+   * Run `work` under the step's `timeout-minutes` budget, if any. If the budget
+   * elapses first the returned promise rejects (failing the step); the abandoned
+   * work's container is force-stopped later during teardown. Steps without a
+   * configured timeout run `work` unchanged.
+   */
+  const withTimeout = async (
+    step: Step,
+    work: () => Promise<void>,
+  ): Promise<void> => {
+    if (step.timeoutMinutes === undefined) {
+      await work();
+      return;
+    }
+    let cancel = (): void => {};
+    const timeout = new Promise<never>((_, reject) => {
+      cancel = timer(step.timeoutMinutes! * 60_000, () => {
+        reject(
+          new Error(
+            `Step "${step.name}" timed out after ${step.timeoutMinutes} minute(s)`,
+          ),
+        );
+      });
+    });
+    try {
+      await Promise.race([work(), timeout]);
+    } finally {
+      cancel();
+    }
+  };
+
   const processStep = async (step: Step): Promise<void> => {
     const record = records.get(step.name)!;
     record.startedAt = Date.now();
@@ -267,34 +309,40 @@ export async function runPipeline(
       }
 
       if (step.service) {
-        await buildOrPull(step);
-        log(`Starting service ${step.name}`);
-        started.add(step.name);
-        // A service has at most one command (enforced at parse time).
-        const argv = step.command ? splitCommand(step.command[0]) : undefined;
-        await docker.startDetached(optionsFor(step, argv), sinkFor(step.name));
-        // Follow the service's output live so it streams as it happens.
-        const follower = docker.followLogs(
-          containerName(step.name),
-          sinkFor(step.name),
-          step.readyOn,
-        );
-        followers.set(step.name, follower);
-        if (step.readyOn !== undefined) {
-          // Hold dependents until the service announces it is ready.
-          log(`Waiting for ${step.name} to be ready (ready-on: ${step.readyOn})`);
-          await follower.ready;
-          log(`Service ${step.name} is ready`);
-        }
+        await withTimeout(step, async () => {
+          await buildOrPull(step);
+          log(`Starting service ${step.name}`);
+          started.add(step.name);
+          // A service has at most one command (enforced at parse time).
+          const argv = step.command ? splitCommand(step.command[0]) : undefined;
+          await docker.startDetached(optionsFor(step, argv), sinkFor(step.name));
+          // Follow the service's output live so it streams as it happens.
+          const follower = docker.followLogs(
+            containerName(step.name),
+            sinkFor(step.name),
+            step.readyOn,
+          );
+          followers.set(step.name, follower);
+          if (step.readyOn !== undefined) {
+            // Hold dependents until the service announces it is ready.
+            log(
+              `Waiting for ${step.name} to be ready (ready-on: ${step.readyOn})`,
+            );
+            await follower.ready;
+            log(`Service ${step.name} is ready`);
+          }
+        });
         // A service keeps running; it is stopped (and its end recorded) by
         // finish() / teardown once no longer needed.
         return;
       }
 
-      await buildOrPull(step);
-      if (step.command !== undefined) {
-        await runCommands(step, step.command);
-      }
+      await withTimeout(step, async () => {
+        await buildOrPull(step);
+        if (step.command !== undefined) {
+          await runCommands(step, step.command);
+        }
+      });
       record.endedAt = Date.now();
       await finish(step);
     } catch (err) {

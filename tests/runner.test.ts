@@ -388,6 +388,59 @@ job:
   assert.equal(steps.find((s) => s.name === "orphan")!.status, "skipped");
 });
 
+test("a step that exceeds its timeout-minutes fails and is torn down", async () => {
+  const config = parseConfig(
+    "job:\n  image: alpine\n  command: go\n  timeout-minutes: 2",
+    "/work",
+  );
+  const docker = new FakeDocker();
+  // The job never finishes on its own; the timeout must abort it.
+  docker.hangRun.add("job");
+  let scheduledMs = 0;
+  const timer = (ms: number, fire: () => void) => {
+    scheduledMs = ms;
+    fire(); // the budget elapses while the job is still running
+    return () => {};
+  };
+  const { ok, steps } = await runPipeline(config, { docker, ...base, timer });
+
+  assert.equal(ok, false);
+  // 2 minutes, expressed in milliseconds.
+  assert.equal(scheduledMs, 120000);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "failure");
+  // The abandoned container is force-stopped and the network removed.
+  assert.deepEqual(docker.kinds("stop"), ["net-job"]);
+  assert.deepEqual(docker.kinds("removeNetwork"), ["net"]);
+});
+
+test("a step that completes within its timeout cancels the timer", async () => {
+  const config = parseConfig(
+    "job:\n  image: alpine\n  command: go\n  timeout-minutes: 5",
+    "/work",
+  );
+  const docker = new FakeDocker();
+  let cancelled = false;
+  const timer = (_ms: number, _fire: () => void) => () => {
+    cancelled = true;
+  };
+  const { ok, steps } = await runPipeline(config, { docker, ...base, timer });
+
+  assert.equal(ok, true);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "success");
+  assert.ok(cancelled, "the timeout timer is cancelled once the step finishes");
+});
+
+test("a step without timeout-minutes schedules no timer", async () => {
+  const docker = new FakeDocker();
+  let scheduled = 0;
+  const timer = (_ms: number, _fire: () => void) => {
+    scheduled++;
+    return () => {};
+  };
+  await runPipeline(load(), { docker, ...base, timer });
+  assert.equal(scheduled, 0);
+});
+
 test("aborting stops running containers and removes the network before returning", async () => {
   const config = parseConfig(
     `
