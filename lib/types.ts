@@ -58,6 +58,12 @@ export interface Step {
    * `delay` does not count against this budget. Undefined means no timeout.
    */
   timeoutMinutes?: number;
+  /**
+   * When true, the step's output is not echoed to the terminal. It is still
+   * captured for the HTML report when output capture is enabled. Defaults to
+   * false.
+   */
+  quiet: boolean;
 }
 
 /** A fully parsed and validated configuration file. */

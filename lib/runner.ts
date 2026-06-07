@@ -162,6 +162,7 @@ export async function runPipeline(
         const code = await docker.run(
           optionsFor(step, splitCommand(commands[0])),
           sink,
+          step.quiet,
         );
         if (code !== 0) {
           throw new Error(`Step "${step.name}" failed with exit code ${code}`);
@@ -188,6 +189,7 @@ export async function runPipeline(
               keep: true,
             }),
             sink,
+            step.quiet,
           );
           if (code !== 0) {
             throw new Error(`Step "${step.name}" failed with exit code ${code}`);
@@ -214,13 +216,19 @@ export async function runPipeline(
     const sink = sinkFor(step.name);
     if (step.dockerfile !== undefined) {
       log(`Building ${step.name} (${step.dockerfile})`);
-      await docker.build(imageTag(step), step.dockerfile, config.baseDir, sink);
+      await docker.build(
+        imageTag(step),
+        step.dockerfile,
+        config.baseDir,
+        sink,
+        step.quiet,
+      );
     } else if (step.imageFrom !== undefined) {
       // The image is produced by the build step we depend on; nothing to pull.
       log(`Using image from ${step.imageFrom} for ${step.name}`);
     } else {
       log(`Pulling ${step.name} (${step.image})`);
-      await docker.pull(step.image!, sink);
+      await docker.pull(step.image!, sink, step.quiet);
     }
   };
 
@@ -315,12 +323,17 @@ export async function runPipeline(
           started.add(step.name);
           // A service has at most one command (enforced at parse time).
           const argv = step.command ? splitCommand(step.command[0]) : undefined;
-          await docker.startDetached(optionsFor(step, argv), sinkFor(step.name));
+          await docker.startDetached(
+            optionsFor(step, argv),
+            sinkFor(step.name),
+            step.quiet,
+          );
           // Follow the service's output live so it streams as it happens.
           const follower = docker.followLogs(
             containerName(step.name),
             sinkFor(step.name),
             step.readyOn,
+            step.quiet,
           );
           followers.set(step.name, follower);
           if (step.readyOn !== undefined) {

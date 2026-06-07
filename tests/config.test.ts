@@ -377,6 +377,20 @@ test("timeout-minutes rejects non-positive and non-numeric values", () => {
   );
 });
 
+test("quiet is parsed and defaults to false", () => {
+  const quiet = parseConfig("a:\n  image: x\n  quiet: true", "/w").steps.get("a")!;
+  assert.equal(quiet.quiet, true);
+  const loud = parseConfig("a:\n  image: x", "/w").steps.get("a")!;
+  assert.equal(loud.quiet, false);
+});
+
+test("quiet must be a boolean", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  quiet: yes", "/w"),
+    /key "quiet" must be true or false/,
+  );
+});
+
 test("normalises a single port and a list of ports", () => {
   const single = parseConfig("a:\n  image: x\n  ports: 80", "/w").steps.get("a")!;
   assert.deepEqual(single.ports, [80]);

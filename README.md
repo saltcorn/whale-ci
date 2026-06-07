@@ -67,6 +67,10 @@ The valid keys in each section are:
 * timeout-minutes: a positive number of minutes. If the step does not complete
   its execution within this many minutes it is aborted and the step fails. The
   `delay` does not count against this budget.
+* quiet: `true` or `false` (default `false`). When `true` the step's output is
+  not echoed to the terminal. It is still captured for the HTML report (when one
+  is requested with `--output`), so you can keep a noisy step off the console
+  without losing its log.
 
 # Networking between steps
 

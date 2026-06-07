@@ -25,6 +25,8 @@ class FakeDocker implements DockerClient {
   runImages: string[] = [];
   /** The most recent run/startDetached options for each step alias. */
   launched = new Map<string, RunOptions>();
+  /** The `quiet` flag passed alongside each output-producing call, by alias. */
+  quietByAlias = new Map<string, boolean>();
   /** Container names that never reach their ready-on marker. */
   readyFail = new Set<string>();
   /** Aliases whose `run` blocks until the container is force-stopped. */
@@ -44,6 +46,7 @@ class FakeDocker implements DockerClient {
     _dockerfile: string,
     _context: string,
     sink?: OutputSink,
+    _quiet?: boolean,
   ): Promise<void> {
     this.events.push({ kind: "build", arg: tag });
     sink?.(`building ${tag}\n`);
@@ -51,15 +54,20 @@ class FakeDocker implements DockerClient {
       throw new Error(`build failed: ${tag}`);
     }
   }
-  async pull(image: string, sink?: OutputSink): Promise<void> {
+  async pull(image: string, sink?: OutputSink, _quiet?: boolean): Promise<void> {
     this.events.push({ kind: "pull", arg: image });
     sink?.(`pulling ${image}\n`);
   }
-  async run(options: RunOptions, sink?: OutputSink): Promise<number> {
+  async run(
+    options: RunOptions,
+    sink?: OutputSink,
+    quiet?: boolean,
+  ): Promise<number> {
     this.events.push({ kind: "run", arg: options.alias });
     this.runCommands.push(options.command);
     this.runImages.push(options.image);
     this.launched.set(options.alias, options);
+    this.quietByAlias.set(options.alias, quiet ?? false);
     sink?.(`output of ${options.alias}\n`);
     this.onRun?.(options.alias);
     if (this.hangRun.has(options.alias)) {
@@ -70,15 +78,21 @@ class FakeDocker implements DockerClient {
     }
     return this.runExitCodes.get(options.alias) ?? 0;
   }
-  async startDetached(options: RunOptions, sink?: OutputSink): Promise<void> {
+  async startDetached(
+    options: RunOptions,
+    sink?: OutputSink,
+    quiet?: boolean,
+  ): Promise<void> {
     this.events.push({ kind: "startDetached", arg: options.alias });
     this.launched.set(options.alias, options);
+    this.quietByAlias.set(options.alias, quiet ?? false);
     sink?.(`started ${options.alias}\n`);
   }
   followLogs(
     name: string,
     sink?: OutputSink,
     readyNeedle?: string,
+    _quiet?: boolean,
   ): LogFollower {
     this.events.push({ kind: "followLogs", arg: name });
     // Simulate live output streaming as the follower attaches.
@@ -652,6 +666,31 @@ test("failed step is reported as failure", async () => {
   });
   const t = steps.find((s) => s.name === "test")!;
   assert.equal(t.status, "failure");
+});
+
+test("a quiet step is run with the terminal echo suppressed but still captured", async () => {
+  const config = parseConfig(
+    "job:\n  image: alpine\n  command: go\n  quiet: true",
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const { steps } = await runPipeline(config, {
+    docker,
+    ...base,
+    captureOutput: true,
+  });
+
+  // The runner asks docker to suppress the terminal echo for this step...
+  assert.equal(docker.quietByAlias.get("job"), true);
+  // ...but the output is still captured into the report.
+  assert.match(steps.find((s) => s.name === "job")!.output, /output of job/);
+});
+
+test("a non-quiet step runs with the terminal echo on", async () => {
+  const config = parseConfig("job:\n  image: alpine\n  command: go", "/work");
+  const docker = new FakeDocker();
+  await runPipeline(config, { docker, ...base });
+  assert.equal(docker.quietByAlias.get("job"), false);
 });
 
 test("output is not captured unless requested", async () => {

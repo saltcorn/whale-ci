@@ -15,6 +15,7 @@ function step(partial: Partial<Step> & { name: string }): Step {
     depends: [],
     environment: [],
     ports: [],
+    quiet: false,
     ...partial,
   };
 }

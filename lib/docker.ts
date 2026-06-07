@@ -48,7 +48,9 @@ export interface LogFollower {
  * the orchestration can be tested without a real docker daemon.
  *
  * Methods that produce user-facing output take an optional `sink`; when present
- * the output is both streamed to the terminal and forwarded to the sink.
+ * the output is forwarded to the sink for the report. By default the output is
+ * also streamed to the terminal; pass `quiet` to suppress that echo (the sink,
+ * if any, still receives it).
  */
 export interface DockerClient {
   createNetwork(name: string): Promise<void>;
@@ -59,23 +61,30 @@ export interface DockerClient {
     dockerfile: string,
     context: string,
     sink?: OutputSink,
+    quiet?: boolean,
   ): Promise<void>;
   /** Pull an image from a registry. */
-  pull(image: string, sink?: OutputSink): Promise<void>;
+  pull(image: string, sink?: OutputSink, quiet?: boolean): Promise<void>;
   /** Run a container to completion, resolving with its exit code. */
-  run(options: RunOptions, sink?: OutputSink): Promise<number>;
+  run(options: RunOptions, sink?: OutputSink, quiet?: boolean): Promise<number>;
   /** Start a container detached, resolving once it is running. */
-  startDetached(options: RunOptions, sink?: OutputSink): Promise<void>;
+  startDetached(
+    options: RunOptions,
+    sink?: OutputSink,
+    quiet?: boolean,
+  ): Promise<void>;
   /**
    * Start following a container's output live, streaming each chunk to the
-   * terminal and (if given) the sink as it arrives — so a service's output is
-   * not deferred until the step ends. When `readyNeedle` is supplied the
-   * returned handle's `ready` promise resolves when that string appears.
+   * terminal (unless `quiet`) and (if given) the sink as it arrives — so a
+   * service's output is not deferred until the step ends. When `readyNeedle` is
+   * supplied the returned handle's `ready` promise resolves when that string
+   * appears.
    */
   followLogs(
     name: string,
     sink?: OutputSink,
     readyNeedle?: string,
+    quiet?: boolean,
   ): LogFollower;
   /** Commit a stopped container's filesystem to a new image tag. */
   commit(container: string, tag: string): Promise<void>;
@@ -195,40 +204,51 @@ export class CliDockerClient implements DockerClient {
     dockerfile: string,
     context: string,
     sink?: OutputSink,
+    quiet?: boolean,
   ): Promise<void> {
     await this.#exec(
       buildArgs(tag, resolve(context, dockerfile), resolve(context)),
-      { sink },
+      { sink, quiet },
     );
   }
 
-  async pull(image: string, sink?: OutputSink): Promise<void> {
-    await this.#exec(["pull", image], { sink });
+  async pull(image: string, sink?: OutputSink, quiet?: boolean): Promise<void> {
+    await this.#exec(["pull", image], { sink, quiet });
   }
 
-  async run(options: RunOptions, sink?: OutputSink): Promise<number> {
+  async run(
+    options: RunOptions,
+    sink?: OutputSink,
+    quiet?: boolean,
+  ): Promise<number> {
     return await this.#exec(runArgs(options, false), {
       allowNonZero: true,
       sink,
+      quiet,
     });
   }
 
-  async startDetached(options: RunOptions, sink?: OutputSink): Promise<void> {
-    await this.#exec(runArgs(options, true), { sink });
+  async startDetached(
+    options: RunOptions,
+    sink?: OutputSink,
+    quiet?: boolean,
+  ): Promise<void> {
+    await this.#exec(runArgs(options, true), { sink, quiet });
   }
 
   /**
    * Follow `docker logs -f` (which replays existing output before following, so
-   * nothing printed before we attach is missed) and stream every chunk straight
-   * to the terminal and the sink as it arrives. When `readyNeedle` is set,
-   * `ready` resolves the moment it appears; if the container stops first the
-   * stream ends and `ready` rejects, so a service that dies before signalling
-   * readiness fails the step.
+   * nothing printed before we attach is missed) and stream every chunk to the
+   * terminal (unless `quiet`) and the sink as it arrives. When `readyNeedle` is
+   * set, `ready` resolves the moment it appears; if the container stops first
+   * the stream ends and `ready` rejects, so a service that dies before
+   * signalling readiness fails the step.
    */
   followLogs(
     name: string,
     sink?: OutputSink,
     readyNeedle?: string,
+    quiet?: boolean,
   ): LogFollower {
     const child = spawn(this.#docker, ["logs", "-f", name], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -246,7 +266,7 @@ export class CliDockerClient implements DockerClient {
     let buffer = "";
     const onChunk = (chunk: Buffer, out: NodeJS.WriteStream): void => {
       const text = chunk.toString();
-      out.write(text);
+      if (!quiet) out.write(text);
       sink?.(text);
       if (readySettled) return;
       buffer += text;
@@ -309,8 +329,9 @@ export class CliDockerClient implements DockerClient {
 
   /**
    * Spawn `docker` with the given args. With a `sink` the output is piped and
-   * teed to both the terminal and the sink (for the report); otherwise stdio is
-   * inherited so docker can stream directly. Resolves with the exit code;
+   * forwarded to the sink (for the report), and also echoed to the terminal
+   * unless `quiet`. Without a sink, stdio is inherited so docker streams
+   * directly — or discarded entirely when `quiet`. Resolves with the exit code;
    * rejects on non-zero unless `allowNonZero` is set.
    */
   #exec(
@@ -328,7 +349,7 @@ export class CliDockerClient implements DockerClient {
         ): void => {
           stream?.on("data", (chunk: Buffer) => {
             const text = chunk.toString();
-            out.write(text);
+            if (!opts.quiet) out.write(text);
             opts.sink!(text);
           });
         };

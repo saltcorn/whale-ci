@@ -16,6 +16,7 @@ const KNOWN_KEYS = new Set([
   "ready-on",
   "delay",
   "timeout-minutes",
+  "quiet",
 ]);
 
 /** Read, parse and validate a config file, returning the structured Config. */
@@ -130,6 +131,7 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     readyOn,
     delay: optionalDelay(raw["delay"], name),
     timeoutMinutes: optionalTimeoutMinutes(raw["timeout-minutes"], name),
+    quiet: optionalBoolean(raw["quiet"], name, "quiet") ?? false,
   };
 }
 
