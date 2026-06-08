@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildArgs,
+  firstFromImage,
   imageTag,
+  rewriteBaseImage,
   type RunOptions,
   runArgs,
   splitCommand,
@@ -20,19 +22,61 @@ function step(partial: Partial<Step> & { name: string }): Step {
   };
 }
 
-test("imageTag uses the pulled image name, or a dockerci tag for builds", () => {
-  assert.equal(imageTag(step({ name: "db", image: "postgres" })), "postgres");
+test("imageTag uses the pulled image name, or a per-run dockerci tag for builds", () => {
   assert.equal(
-    imageTag(step({ name: "test", dockerfile: "./D" })),
-    "dockerci/test:latest",
+    imageTag(step({ name: "db", image: "postgres" }), "run1"),
+    "postgres",
   );
+  assert.equal(
+    imageTag(step({ name: "test", dockerfile: "./D" }), "run1"),
+    "dockerci/test:run1",
+  );
+});
+
+test("imageTag scopes built tags by run id so concurrent runs do not collide", () => {
+  const built = step({ name: "test", dockerfile: "./D" });
+  assert.equal(imageTag(built, "runA"), "dockerci/test:runA");
+  assert.equal(imageTag(built, "runB"), "dockerci/test:runB");
 });
 
 test("imageTag uses a referenced build step's generated image", () => {
   assert.equal(
-    imageTag(step({ name: "test", image: "build", imageFrom: "build" })),
-    "dockerci/build:latest",
+    imageTag(step({ name: "test", image: "build", imageFrom: "build" }), "run1"),
+    "dockerci/build:run1",
   );
+});
+
+test("firstFromImage returns the image of the first FROM, ignoring comments and flags", () => {
+  assert.equal(firstFromImage("FROM alpine"), "alpine");
+  assert.equal(firstFromImage("# a comment\n\nFROM build AS stage"), "build");
+  assert.equal(
+    firstFromImage("FROM --platform=linux/amd64 build:1.2"),
+    "build:1.2",
+  );
+  // ARG before FROM is legal; the first FROM still wins.
+  assert.equal(firstFromImage("ARG V=1\nFROM base"), "base");
+  assert.equal(firstFromImage("# only comments\n"), undefined);
+});
+
+test("rewriteBaseImage replaces only the first FROM's image, keeping flags and stage", () => {
+  assert.equal(
+    rewriteBaseImage("FROM build\nRUN make", "dockerci/build:run1"),
+    "FROM dockerci/build:run1\nRUN make",
+  );
+  assert.equal(
+    rewriteBaseImage(
+      "FROM --platform=linux/amd64 build AS app\nRUN make",
+      "dockerci/build:run1",
+    ),
+    "FROM --platform=linux/amd64 dockerci/build:run1 AS app\nRUN make",
+  );
+  // A later FROM (multi-stage) is left untouched.
+  assert.equal(
+    rewriteBaseImage("FROM build\nFROM build\n", "x"),
+    "FROM x\nFROM build\n",
+  );
+  // No FROM: returned unchanged.
+  assert.equal(rewriteBaseImage("RUN echo hi", "x"), "RUN echo hi");
 });
 
 test("splitCommand splits on whitespace and handles empties", () => {

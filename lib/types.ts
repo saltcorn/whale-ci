@@ -19,6 +19,14 @@ export interface Step {
    */
   imageFrom?: string;
   /**
+   * When this step's Dockerfile begins with `FROM <name>` and `<name>` is
+   * another step that also builds from a Dockerfile, this holds that step's
+   * name. That step's generated image is used as the base image (the build's
+   * first `FROM` is rewritten to point at it), and an implicit dependency on it
+   * is added so the base is built first.
+   */
+  baseFrom?: string;
+  /**
    * When true, the container runs in the background for as long as at least one
    * other step still depends on it, then is stopped. When false, the container
    * runs its command to completion before dependents proceed.

@@ -33,7 +33,15 @@ on the linked docker registry.
 
 The valid keys in each section are:
 
-* dockerfile: A path to a Docker file to build, relative to the yaml file locatiom
+* dockerfile: A path to a Docker file to build, relative to the yaml file
+  locatiom. If the Dockerfile's first `FROM` instruction names another step that
+  also builds from a `dockerfile`, that step's freshly-built image is used as the
+  base image instead of being pulled from a registry, and an implicit dependency
+  on that step is added (even without `depends`) so it is built first. For
+  example, a `base` step building a common image and an `app` step whose
+  Dockerfile starts `FROM base` will have `app` built on top of `base`. The
+  base substitution is per-run, so several pipelines can build in parallel
+  without clobbering one another's images.
 * image: the image to pull if there is no docker file. If the value matches the
   name of another step that builds its own image (a step with a `dockerfile`),
   that step's generated image is used instead of pulling from the registry, and

@@ -1,8 +1,15 @@
-export { loadConfig, parseConfig } from "./config.ts";
+export {
+  type DockerfileReader,
+  loadConfig,
+  parseConfig,
+  resolveDockerfileBases,
+} from "./config.ts";
 export {
   buildArgs,
   CliDockerClient,
+  firstFromImage,
   imageTag,
+  rewriteBaseImage,
   runArgs,
   splitCommand,
 } from "./docker.ts";

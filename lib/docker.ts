@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { Step } from "./types.ts";
 
@@ -55,13 +56,19 @@ export interface LogFollower {
 export interface DockerClient {
   createNetwork(name: string): Promise<void>;
   removeNetwork(name: string): Promise<void>;
-  /** Build an image from a Dockerfile. */
+  /**
+   * Build an image from a Dockerfile. When `baseImage` is given, the build's
+   * first `FROM` instruction is rewritten to use that image (so a step can build
+   * on top of another step's generated image); the rewritten Dockerfile is fed
+   * to docker on stdin and the original file is left untouched.
+   */
   build(
     tag: string,
     dockerfile: string,
     context: string,
     sink?: OutputSink,
     quiet?: boolean,
+    baseImage?: string,
   ): Promise<void>;
   /** Pull an image from a registry. */
   pull(image: string, sink?: OutputSink, quiet?: boolean): Promise<void>;
@@ -94,16 +101,61 @@ export interface DockerClient {
   stop(name: string): Promise<void>;
 }
 
-/** The image tag used for a step. Built steps get a `dockerci/` prefix. */
-export function imageTag(step: Step): string {
+/**
+ * The image tag used for a step. A built step's image is tagged
+ * `dockerci/<name>:<runId>`, where `runId` is unique to this pipeline run, so
+ * concurrent runs (e.g. several webhook pushes) never share or clobber each
+ * other's images. A step pulling a plain `image` uses that image name as-is.
+ */
+export function imageTag(step: Step, runId: string): string {
   // An `image` that names another build step runs that step's generated image.
   if (step.imageFrom !== undefined) {
-    return `dockerci/${step.imageFrom}:latest`;
+    return builtImageTag(step.imageFrom, runId);
   }
   if (step.image !== undefined) {
     return step.image;
   }
-  return `dockerci/${step.name}:latest`;
+  return builtImageTag(step.name, runId);
+}
+
+/** The per-run image tag a build step's `name` produces. */
+function builtImageTag(name: string, runId: string): string {
+  return `dockerci/${name}:${runId}`;
+}
+
+/**
+ * The image named by the first `FROM` instruction in a Dockerfile, or undefined
+ * if there is none. Blank lines and comments are skipped, `--platform=` (and
+ * other) flags are ignored, and any `AS <stage>` suffix is dropped — only the
+ * image reference is returned.
+ */
+export function firstFromImage(dockerfile: string): string | undefined {
+  for (const raw of dockerfile.split(/\r?\n/)) {
+    const tokens = raw.trim().split(/\s+/);
+    if (tokens[0]?.toUpperCase() !== "FROM") continue;
+    let i = 1;
+    while (tokens[i]?.startsWith("--")) i++; // skip flags such as --platform=...
+    return tokens[i];
+  }
+  return undefined;
+}
+
+/**
+ * Rewrite the image of the first `FROM` instruction in a Dockerfile to
+ * `image`, preserving the instruction's flags and any `AS <stage>` suffix and
+ * leaving the rest of the file unchanged. If there is no `FROM`, the text is
+ * returned untouched.
+ */
+export function rewriteBaseImage(dockerfile: string, image: string): string {
+  const lines = dockerfile.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    // Capture: leading "FROM " + flags, the image token, then the remainder.
+    const match = /^(\s*FROM\s+(?:--\S+\s+)*)(\S+)(.*)$/i.exec(lines[i]!);
+    if (match === null) continue;
+    lines[i] = `${match[1]}${image}${match[3]}`;
+    return lines.join("\n");
+  }
+  return dockerfile;
 }
 
 /**
@@ -205,11 +257,28 @@ export class CliDockerClient implements DockerClient {
     context: string,
     sink?: OutputSink,
     quiet?: boolean,
+    baseImage?: string,
   ): Promise<void> {
-    await this.#exec(
-      buildArgs(tag, resolve(context, dockerfile), resolve(context)),
-      { sink, quiet },
+    const dockerfilePath = resolve(context, dockerfile);
+    if (baseImage === undefined) {
+      await this.#exec(buildArgs(tag, dockerfilePath, resolve(context)), {
+        sink,
+        quiet,
+      });
+      return;
+    }
+    // Build on top of another step's generated image: rewrite the first FROM to
+    // point at it and feed the rewritten Dockerfile in on stdin (`-f -`), so the
+    // original file on disk is never modified — safe under parallel builds.
+    const rewritten = rewriteBaseImage(
+      await readFile(dockerfilePath, "utf8"),
+      baseImage,
     );
+    await this.#exec(["build", "-t", tag, "-f", "-", resolve(context)], {
+      sink,
+      quiet,
+      input: rewritten,
+    });
   }
 
   async pull(image: string, sink?: OutputSink, quiet?: boolean): Promise<void> {
@@ -336,11 +405,24 @@ export class CliDockerClient implements DockerClient {
    */
   #exec(
     args: string[],
-    opts: { allowNonZero?: boolean; quiet?: boolean; sink?: OutputSink } = {},
+    opts: {
+      allowNonZero?: boolean;
+      quiet?: boolean;
+      sink?: OutputSink;
+      input?: string;
+    } = {},
   ): Promise<number> {
     return new Promise((resolvePromise, reject) => {
-      const stdio = opts.sink ? "pipe" : opts.quiet ? "ignore" : "inherit";
-      const child = spawn(this.#docker, args, { stdio });
+      const streamMode = opts.sink ? "pipe" : opts.quiet ? "ignore" : "inherit";
+      // Pipe stdin only when there is input to write (e.g. a Dockerfile fed in
+      // on `-f -`); otherwise leave it as the shared stream mode.
+      const stdin = opts.input !== undefined ? "pipe" : streamMode;
+      const child = spawn(this.#docker, args, {
+        stdio: [stdin, streamMode, streamMode],
+      });
+      if (opts.input !== undefined) {
+        child.stdin!.end(opts.input);
+      }
 
       if (opts.sink) {
         const tee = (

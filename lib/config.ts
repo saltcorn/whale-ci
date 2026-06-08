@@ -1,7 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { firstFromImage } from "./docker.ts";
 import { type Config, ConfigError, type Step } from "./types.ts";
+
+/** Reads a Dockerfile's text given its path; injectable for testing. */
+export type DockerfileReader = (path: string) => Promise<string>;
 
 /** Keys that are accepted inside a step section. Anything else is an error. */
 const KNOWN_KEYS = new Set([
@@ -20,14 +24,53 @@ const KNOWN_KEYS = new Set([
 ]);
 
 /** Read, parse and validate a config file, returning the structured Config. */
-export async function loadConfig(file: string): Promise<Config> {
+export async function loadConfig(
+  file: string,
+  readDockerfile: DockerfileReader = (path) => readFile(path, "utf8"),
+): Promise<Config> {
   let text: string;
   try {
     text = await readFile(file, "utf8");
   } catch {
     throw new ConfigError(`Cannot read config file: ${file}`);
   }
-  return parseConfig(text, dirname(resolve(file)));
+  const config = parseConfig(text, dirname(resolve(file)));
+  await resolveDockerfileBases(config, readDockerfile);
+  return config;
+}
+
+/**
+ * Inspect each build step's Dockerfile and, when its first `FROM` names another
+ * step that also builds from a Dockerfile, link the two: record that step as the
+ * base (`baseFrom`) and add an implicit dependency on it so it is built first.
+ * A `FROM` that names no build step (or names this step itself) is left alone
+ * and pulled as usual. Re-checks for cycles the new dependencies may introduce.
+ *
+ * A Dockerfile that cannot be read is skipped (its `FROM` is left as-is); a
+ * genuinely missing file surfaces later when the build is attempted.
+ */
+export async function resolveDockerfileBases(
+  config: Config,
+  readDockerfile: DockerfileReader,
+): Promise<void> {
+  for (const step of config.steps.values()) {
+    if (step.dockerfile === undefined) continue;
+    let text: string;
+    try {
+      text = await readDockerfile(resolve(config.baseDir, step.dockerfile));
+    } catch {
+      continue;
+    }
+    const from = firstFromImage(text);
+    if (from === undefined || from === step.name) continue;
+    const base = config.steps.get(from);
+    if (base === undefined || base.dockerfile === undefined) continue;
+    step.baseFrom = from;
+    if (!step.depends.includes(from)) {
+      step.depends = [...step.depends, from];
+    }
+  }
+  detectCycles(config.steps);
 }
 
 /**

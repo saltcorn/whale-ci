@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseConfig } from "../lib/config.ts";
+import { parseConfig, resolveDockerfileBases } from "../lib/config.ts";
 import type {
   DockerClient,
   LogFollower,
@@ -19,6 +19,8 @@ class FakeDocker implements DockerClient {
   events: Event[] = [];
   runExitCodes = new Map<string, number>();
   failBuild = new Set<string>();
+  /** Base image passed to `build`, captured per built tag. */
+  buildBaseByTag = new Map<string, string | undefined>();
   /** Container command argv captured per `run`, in call order. */
   runCommands: (string[] | undefined)[] = [];
   /** Image reference captured per `run`, in call order. */
@@ -47,8 +49,10 @@ class FakeDocker implements DockerClient {
     _context: string,
     sink?: OutputSink,
     _quiet?: boolean,
+    baseImage?: string,
   ): Promise<void> {
     this.events.push({ kind: "build", arg: tag });
+    this.buildBaseByTag.set(tag, baseImage);
     sink?.(`building ${tag}\n`);
     if (this.failBuild.has(tag)) {
       throw new Error(`build failed: ${tag}`);
@@ -171,7 +175,7 @@ test("happy path builds, pulls, starts service, runs job, cleans up", async () =
   // both dockerfile steps are built, the service image is pulled.
   assert.deepEqual(
     docker.kinds("build").sort(),
-    ["dockerci/build:latest", "dockerci/test:latest"],
+    ["dockerci/build:net", "dockerci/test:net"],
   );
   assert.deepEqual(docker.kinds("pull"), ["postgres"]);
   // database (service: true) is started detached; test (a job) is run.
@@ -197,7 +201,7 @@ test("a non-service dependency runs to completion before its dependent", async (
   const docker = new FakeDocker();
   await runPipeline(load(), { docker, ...base });
   // `build` is a non-service dependency: its image must be built before `test` runs.
-  const buildImg = docker.at("build:dockerci/build:latest");
+  const buildImg = docker.at("build:dockerci/build:net");
   const runTest = docker.at("run:test");
   assert.ok(buildImg !== -1 && buildImg < runTest);
 });
@@ -518,7 +522,7 @@ test("non-zero job exit code fails the pipeline but still cleans up", async () =
 test("build failure fails the pipeline and still cleans up", async () => {
   const docker = new FakeDocker();
   const config = parseConfig("solo:\n  dockerfile: ./D\n", "/work");
-  docker.failBuild.add("dockerci/solo:latest");
+  docker.failBuild.add("dockerci/solo:net");
   const { ok } = await runPipeline(config, { docker, ...base });
 
   assert.equal(ok, false);
@@ -531,7 +535,7 @@ test("a build-only step (no command, not a service) is only built", async () => 
   const { ok } = await runPipeline(config, { docker, ...base });
 
   assert.equal(ok, true);
-  assert.deepEqual(docker.kinds("build"), ["dockerci/build:latest"]);
+  assert.deepEqual(docker.kinds("build"), ["dockerci/build:net"]);
   assert.deepEqual(docker.kinds("run"), []);
   assert.deepEqual(docker.kinds("startDetached"), []);
   assert.deepEqual(docker.kinds("stop"), []);
@@ -553,12 +557,45 @@ test:
 
   assert.equal(ok, true);
   // Only the build step is built; nothing is pulled for `test`.
-  assert.deepEqual(docker.kinds("build"), ["dockerci/build:latest"]);
+  assert.deepEqual(docker.kinds("build"), ["dockerci/build:net"]);
   assert.deepEqual(docker.kinds("pull"), []);
   // `test` runs the generated image, after the build (the implicit dependency).
-  const buildImg = docker.at("build:dockerci/build:latest");
+  const buildImg = docker.at("build:dockerci/build:net");
   const runTest = docker.at("run:test");
   assert.ok(buildImg !== -1 && buildImg < runTest);
+});
+
+test("a step whose Dockerfile FROMs a build step uses that step's image as the base", async () => {
+  const config = parseConfig(
+    `
+base:
+  dockerfile: ./Dockerfile.base
+app:
+  dockerfile: ./Dockerfile.app
+  command: runtests
+`,
+    "/work",
+  );
+  await resolveDockerfileBases(config, async (path) =>
+    path.endsWith("Dockerfile.app") ? "FROM base\nRUN make" : "FROM alpine");
+
+  const docker = new FakeDocker();
+  const { ok } = await runPipeline(config, { docker, ...base });
+
+  assert.equal(ok, true);
+  // The base builds first (the implicit dependency), then the dependent.
+  const buildBase = docker.at("build:dockerci/base:net");
+  const buildApp = docker.at("build:dockerci/app:net");
+  assert.ok(buildBase !== -1 && buildBase < buildApp);
+  // The dependent's build is given the base step's per-run image to build on,
+  // while the base itself builds from a registry image (no override).
+  assert.equal(docker.buildBaseByTag.get("dockerci/app:net"), "dockerci/base:net");
+  assert.equal(docker.buildBaseByTag.get("dockerci/base:net"), undefined);
+  // Both per-run images are removed on teardown so they do not accumulate.
+  assert.deepEqual(
+    docker.kinds("removeImage").sort(),
+    ["dockerci/app:net", "dockerci/base:net"],
+  );
 });
 
 test("a list of commands runs each through the entrypoint, committing between them", async () => {

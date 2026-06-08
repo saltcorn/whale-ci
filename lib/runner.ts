@@ -78,6 +78,9 @@ export async function runPipeline(
 ): Promise<PipelineResult> {
   const docker = options.docker ?? new CliDockerClient();
   const network = options.network ?? `dockerci-${process.pid}-${Date.now()}`;
+  // The network name is unique per run, so it doubles as the run id that scopes
+  // this run's built image tags away from any concurrent run's.
+  const runId = network;
   const log = options.log ?? ((message: string) => console.error(message));
   const capture = options.captureOutput ?? false;
   const sleep = options.sleep ??
@@ -103,6 +106,9 @@ export async function runPipeline(
   // Names of job containers currently running, so an interrupted run can force
   // them down (services are tracked via `started`/`stopped`).
   const liveContainers = new Set<string>();
+  // Image tags this run has built, removed during teardown so per-run images do
+  // not accumulate on the host.
+  const builtImages = new Set<string>();
   let ok = true;
 
   // One record per step, created up front so the report keeps config order.
@@ -134,7 +140,7 @@ export async function runPipeline(
     command: string[] | undefined,
     overrides: { image?: string; name?: string; keep?: boolean } = {},
   ): RunOptions => ({
-    image: overrides.image ?? imageTag(step),
+    image: overrides.image ?? imageTag(step, runId),
     name: overrides.name ?? containerName(step.name),
     network,
     alias: step.name,
@@ -173,7 +179,7 @@ export async function runPipeline(
       return;
     }
 
-    let image = imageTag(step);
+    let image = imageTag(step, runId);
     const intermediates: string[] = [];
     try {
       for (let i = 0; i < commands.length; i++) {
@@ -215,13 +221,25 @@ export async function runPipeline(
   const buildOrPull = async (step: Step): Promise<void> => {
     const sink = sinkFor(step.name);
     if (step.dockerfile !== undefined) {
-      log(`Building ${step.name} (${step.dockerfile})`);
+      // When the step's Dockerfile builds FROM another step, use that step's
+      // generated image as the base instead of pulling it from a registry.
+      const baseImage = step.baseFrom !== undefined
+        ? imageTag(config.steps.get(step.baseFrom)!, runId)
+        : undefined;
+      log(
+        baseImage !== undefined
+          ? `Building ${step.name} (${step.dockerfile}) on ${step.baseFrom}`
+          : `Building ${step.name} (${step.dockerfile})`,
+      );
+      const tag = imageTag(step, runId);
+      builtImages.add(tag);
       await docker.build(
-        imageTag(step),
+        tag,
         step.dockerfile,
         config.baseDir,
         sink,
         step.quiet,
+        baseImage,
       );
     } else if (step.imageFrom !== undefined) {
       // The image is produced by the build step we depend on; nothing to pull.
@@ -380,6 +398,10 @@ export async function runPipeline(
       for (const name of [...liveContainers]) {
         liveContainers.delete(name);
         await docker.stop(name);
+      }
+      // Drop this run's built images now that no container references them.
+      for (const tag of builtImages) {
+        await docker.removeImage(tag);
       }
       await docker.removeNetwork(network);
     })();

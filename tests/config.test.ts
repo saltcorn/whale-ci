@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseConfig } from "../lib/config.ts";
+import { parseConfig, resolveDockerfileBases } from "../lib/config.ts";
 import { ConfigError } from "../lib/types.ts";
+
+/** Build a Dockerfile reader from a path-suffix -> contents map. */
+function reader(files: Record<string, string>) {
+  return async (path: string): Promise<string> => {
+    for (const [suffix, text] of Object.entries(files)) {
+      if (path.endsWith(suffix)) return text;
+    }
+    throw new Error(`no such file: ${path}`);
+  };
+}
 
 const README_EXAMPLE = `
 build:
@@ -190,6 +200,99 @@ b:
   image: a
 `;
   assert.throws(() => parseConfig(yaml, "/w"), /cycle/);
+});
+
+test("a Dockerfile FROM naming another build step links it as the base image", async () => {
+  const config = parseConfig(
+    `
+base:
+  dockerfile: ./Dockerfile.base
+app:
+  dockerfile: ./Dockerfile.app
+  command: runtests
+`,
+    "/w",
+  );
+  await resolveDockerfileBases(
+    config,
+    reader({
+      "Dockerfile.base": "FROM alpine\nRUN apk add make",
+      "Dockerfile.app": "FROM base\nRUN make",
+    }),
+  );
+  const app = config.steps.get("app")!;
+  assert.equal(app.baseFrom, "base");
+  assert.deepEqual(app.depends, ["base"]);
+  // The base step itself builds FROM a registry image, so it has no baseFrom.
+  assert.equal(config.steps.get("base")!.baseFrom, undefined);
+});
+
+test("a base link does not duplicate an existing explicit dependency", async () => {
+  const config = parseConfig(
+    `
+base:
+  dockerfile: ./Dockerfile.base
+app:
+  dockerfile: ./Dockerfile.app
+  depends: base
+  command: runtests
+`,
+    "/w",
+  );
+  await resolveDockerfileBases(
+    config,
+    reader({
+      "Dockerfile.base": "FROM alpine",
+      "Dockerfile.app": "FROM base",
+    }),
+  );
+  assert.deepEqual(config.steps.get("app")!.depends, ["base"]);
+});
+
+test("a FROM that names no build step is left to be pulled", async () => {
+  const config = parseConfig("app:\n  dockerfile: ./D\n", "/w");
+  await resolveDockerfileBases(config, reader({ "D": "FROM node:22" }));
+  assert.equal(config.steps.get("app")!.baseFrom, undefined);
+  assert.deepEqual(config.steps.get("app")!.depends, []);
+});
+
+test("a FROM that names a pull-only step is not linked as a base", async () => {
+  // `cache` only pulls an image; it has no generated image to build on.
+  const config = parseConfig(
+    "cache:\n  image: redis\napp:\n  dockerfile: ./D\n",
+    "/w",
+  );
+  await resolveDockerfileBases(config, reader({ "D": "FROM cache" }));
+  assert.equal(config.steps.get("app")!.baseFrom, undefined);
+  assert.deepEqual(config.steps.get("app")!.depends, []);
+});
+
+test("base links that form a cycle are rejected", async () => {
+  const config = parseConfig(
+    "a:\n  dockerfile: ./Da\nb:\n  dockerfile: ./Db\n",
+    "/w",
+  );
+  await assert.rejects(
+    () =>
+      resolveDockerfileBases(
+        config,
+        reader({ "Da": "FROM b", "Db": "FROM a" }),
+      ),
+    /cycle/,
+  );
+});
+
+test("an unreadable Dockerfile is skipped, leaving its FROM to be pulled", async () => {
+  const config = parseConfig(
+    "base:\n  dockerfile: ./Dockerfile.base\napp:\n  dockerfile: ./missing\n",
+    "/w",
+  );
+  // Only the base Dockerfile is readable; app's is missing at resolve time.
+  await resolveDockerfileBases(
+    config,
+    reader({ "Dockerfile.base": "FROM alpine" }),
+  );
+  assert.equal(config.steps.get("app")!.baseFrom, undefined);
 });
 
 test("normalises a single command string to a one-element list", () => {
