@@ -1,5 +1,5 @@
 {
-  "name": "dock-ci",
+  "name": "whale-ci",
   "version": "0.1.1",
   "description": "Continuous integration with linked docker containers",
   "type": "module",
@@ -7,7 +7,7 @@
     "node": ">=22.18"
   },
   "bin": {
-    "dock-ci": "./dist/src/cli.js"
+    "whale-ci": "./dist/src/cli.js"
   },
   "exports": {
     ".": {

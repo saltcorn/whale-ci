@@ -28,7 +28,7 @@ The table is created on startup, and the app retries until Postgres is ready.
 From this directory:
 
 ```sh
-npx dock-ci ci.yml
+npx whale-ci ci.yml
 # or, from a checkout of this repo:
 node ../../src/cli.ts ci.yml
 

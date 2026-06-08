@@ -12,12 +12,12 @@ import { CiServer, serverConfigFromEnv, verifyCheckout } from "../lib/server.ts"
 import { ConfigError } from "../lib/types.ts";
 
 /**
- * The dock-ci command. cmd-ts handles `--help`/`-h` and argument validation
+ * The whale-ci command. cmd-ts handles `--help`/`-h` and argument validation
  * (missing config file, unknown options) for us, exiting with the right code
  * and message. The handler runs the pipeline and returns the process exit code.
  */
 export const app = command({
-  name: "dock-ci",
+  name: "whale-ci",
   description:
     "Continuous integration with linked docker containers. Builds the images " +
     "described by the YAML config (in parallel where dependencies allow), runs " +
@@ -133,7 +133,7 @@ async function runServe(configFile: string): Promise<number> {
 
     await server.listen(env.listenPort);
     console.error(
-      `dock-ci serving webhooks on port ${env.listenPort} ` +
+      `whale-ci serving webhooks on port ${env.listenPort} ` +
         `(checkout ${repoRoot}, worktrees under ${env.worktreeRoot})`,
     );
 

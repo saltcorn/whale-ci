@@ -92,7 +92,7 @@ export class GitHubStatusReporter implements StatusReporter {
   readonly #token: string;
   readonly #context: string;
 
-  constructor(token: string, context = "dock-ci") {
+  constructor(token: string, context = "whale-ci") {
     this.#token = token;
     this.#context = context;
   }
@@ -109,7 +109,7 @@ export class GitHubStatusReporter implements StatusReporter {
         "Authorization": `Bearer ${this.#token}`,
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "dock-ci",
+        "User-Agent": "whale-ci",
         "Content-Type": "application/json",
       },
       // GitHub truncates descriptions at 140 characters.

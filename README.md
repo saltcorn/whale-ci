@@ -1,4 +1,4 @@
-# dock-ci
+# whale-ci
 Continuous integration with docker containers
 
 This runs CI jobs that are defined in docker containers. The containers 
@@ -111,10 +111,10 @@ step's container. Use `depends` (and, for services that take a moment to start,
 
 # Command-line interface
 
-dock-ci is run from npx. It takes a single argument, the name of the YML 
+whale-ci is run from npx. It takes a single argument, the name of the YML 
 configuration file. It assumes docker is installed on the host machine.
 
-`npx dock-ci ci.yml`
+`npx whale-ci ci.yml`
 
 If no file is given it prints an error. If the argumnt is `--help` it prints a 
 brief help message. It validates the input yaml file and prints an error if it does not
@@ -133,16 +133,16 @@ At the end, whether the test succeeded or not, all running containers are stoppe
   the step name, whether it passed or failed, its execution duration, and all of
   the captured build and container-run output.
 
-`npx dock-ci -o report.html ci.yml`
+`npx whale-ci -o report.html ci.yml`
 
 * `--serve`: run as a CI server instead of running once. This starts an HTTP
   server that acts as the backend for a GitHub push webhook (see below).
 
-`npx dock-ci --serve ci.yml`
+`npx whale-ci --serve ci.yml`
 
 # Server mode (GitHub webhook backend)
 
-With `--serve`, dock-ci runs as a long-lived HTTP server that GitHub can call as
+With `--serve`, whale-ci runs as a long-lived HTTP server that GitHub can call as
 a [push webhook](https://docs.github.com/webhooks). Each accepted push is built
 and tested, and the result is reported back to GitHub as a commit status (so it
 shows up as a check on the commit and pull request).
@@ -175,9 +175,9 @@ The server is configured entirely through environment variables:
 ```sh
 export GITHUB_TOKEN=ghp_...
 export WEBHOOK_SECRET=$(openssl rand -hex 20)
-export WORKTREE_ROOT=/var/tmp/dock-ci
+export WORKTREE_ROOT=/var/tmp/whale-ci
 export LISTEN_PORT=8080
-npx dock-ci --serve ci.yml
+npx whale-ci --serve ci.yml
 ```
 
 `ping` events are answered, non-`push` events are ignored, and branch deletions
