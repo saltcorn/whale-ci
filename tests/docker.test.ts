@@ -13,6 +13,7 @@ import type { Step } from "../lib/types.ts";
 
 function step(partial: Partial<Step> & { name: string }): Step {
   return {
+    runtime: "docker",
     service: false,
     depends: [],
     environment: [],

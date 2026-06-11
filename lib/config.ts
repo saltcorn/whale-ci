@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { firstFromImage } from "./docker.ts";
-import { type Config, ConfigError, type Step } from "./types.ts";
+import { type Config, ConfigError, type Runtime, type Step } from "./types.ts";
 
 /** Reads a Dockerfile's text given its path; injectable for testing. */
 export type DockerfileReader = (path: string) => Promise<string>;
@@ -11,6 +11,7 @@ export type DockerfileReader = (path: string) => Promise<string>;
 const KNOWN_KEYS = new Set([
   "dockerfile",
   "image",
+  "runtime",
   "service",
   "depends",
   "command",
@@ -108,6 +109,7 @@ export function parseConfig(text: string, baseDir: string): Config {
   }
 
   validateReferences(steps);
+  validateRuntimes(steps);
   resolveImageReferences(steps);
   detectCycles(steps);
 
@@ -162,10 +164,25 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     );
   }
 
+  const runtime = optionalRuntime(raw["runtime"], name);
+  if (runtime === "incus") {
+    if (service) {
+      throw new ConfigError(
+        `Step "${name}" uses the incus runtime and cannot be a service`,
+      );
+    }
+    if (dockerfile !== undefined) {
+      throw new ConfigError(
+        `Step "${name}" uses the incus runtime and cannot build from a "dockerfile"; use "image"`,
+      );
+    }
+  }
+
   return {
     name,
     dockerfile,
     image,
+    runtime,
     service,
     depends: stringList(raw["depends"], name, "depends"),
     command,
@@ -195,6 +212,25 @@ function validateReferences(steps: Map<string, Step>): void {
 }
 
 /**
+ * Incus steps cannot use services: a service's container lives on the run's
+ * docker network, which incus instances never join, so depending on one would
+ * be meaningless. (Incus steps cannot *be* services either; that is enforced
+ * per step in parseStep.)
+ */
+function validateRuntimes(steps: Map<string, Step>): void {
+  for (const step of steps.values()) {
+    if (step.runtime !== "incus") continue;
+    for (const dep of step.depends) {
+      if (steps.get(dep)!.service) {
+        throw new ConfigError(
+          `Step "${step.name}" uses the incus runtime and cannot depend on service "${dep}"; there is no shared network between incus and docker steps`,
+        );
+      }
+    }
+  }
+}
+
+/**
  * When a step's `image` names another step that builds its own image (i.e. has
  * a `dockerfile`), wire the two together: the step runs that build step's
  * generated image rather than pulling from a registry, and gains an implicit
@@ -204,6 +240,9 @@ function validateReferences(steps: Map<string, Step>): void {
 function resolveImageReferences(steps: Map<string, Step>): void {
   for (const step of steps.values()) {
     if (step.image === undefined) continue;
+    // An incus step's image always names an incus image; a docker-built image
+    // would be unusable in that runtime, so step names are never resolved.
+    if (step.runtime === "incus") continue;
     const target = steps.get(step.image);
     if (target === undefined || target.dockerfile === undefined) continue;
     step.imageFrom = step.image;
@@ -387,6 +426,19 @@ function envValue(value: unknown, step: string, key: string): string {
   throw new ConfigError(
     `Step "${step}" environment value for "${key}" must be a string, number or boolean`,
   );
+}
+
+/** Accept an optional runtime selector, defaulting to docker. */
+function optionalRuntime(value: unknown, step: string): Runtime {
+  if (value === undefined || value === null) {
+    return "docker";
+  }
+  if (value !== "docker" && value !== "incus") {
+    throw new ConfigError(
+      `Step "${step}" key "runtime" must be "docker" or "incus"`,
+    );
+  }
+  return value;
 }
 
 /** Accept an optional non-negative number of seconds to delay a step. */

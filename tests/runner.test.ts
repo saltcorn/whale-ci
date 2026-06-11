@@ -7,6 +7,7 @@ import type {
   OutputSink,
   RunOptions,
 } from "../lib/docker.ts";
+import type { IncusClient, IncusLaunchOptions } from "../lib/incus.ts";
 import { dependentsOf, runPipeline } from "../lib/runner.ts";
 
 interface Event {
@@ -737,4 +738,234 @@ test("output is not captured unless requested", async () => {
   // nothing is captured into the report.
   assert.deepEqual(docker.kinds("followLogs"), ["net-database"]);
   assert.ok(steps.every((s) => s.output === ""));
+});
+
+/**
+ * A scripted IncusClient. It can share an event list with a FakeDocker so
+ * cross-runtime ordering can be asserted on a single timeline.
+ */
+class FakeIncus implements IncusClient {
+  events: Event[];
+  /** Exit code returned by `exec`, keyed by instance name. */
+  execExitCodes = new Map<string, number>();
+  /** Command argv captured per `exec`, in call order. */
+  execCommands: string[][] = [];
+  /** Environment captured per `exec`, in call order. */
+  execEnvironments: string[][] = [];
+  /** The launch options for each instance. */
+  launched = new Map<string, IncusLaunchOptions>();
+  /** The `quiet` flag passed alongside each call, by instance name. */
+  quietByName = new Map<string, boolean>();
+  /** Instances whose `exec` blocks until the instance is deleted. */
+  hangExec = new Set<string>();
+  /** Called with the instance name at the start of each `exec`. */
+  onExec?: (name: string) => void;
+  #pendingExecs = new Map<string, (code: number) => void>();
+
+  constructor(events: Event[] = []) {
+    this.events = events;
+  }
+
+  async launch(
+    options: IncusLaunchOptions,
+    sink?: OutputSink,
+    quiet?: boolean,
+  ): Promise<void> {
+    this.events.push({ kind: "launch", arg: options.name });
+    this.launched.set(options.name, options);
+    this.quietByName.set(options.name, quiet ?? false);
+    sink?.(`launched ${options.name}\n`);
+  }
+  async exec(
+    name: string,
+    command: string[],
+    environment: string[],
+    sink?: OutputSink,
+    quiet?: boolean,
+  ): Promise<number> {
+    this.events.push({ kind: "exec", arg: name });
+    this.execCommands.push(command);
+    this.execEnvironments.push(environment);
+    this.quietByName.set(name, quiet ?? false);
+    sink?.(`exec output of ${name}\n`);
+    this.onExec?.(name);
+    if (this.hangExec.has(name)) {
+      // Block until `delete` is called for this instance (the interrupt path).
+      return await new Promise<number>((resolve) => {
+        this.#pendingExecs.set(name, resolve);
+      });
+    }
+    return this.execExitCodes.get(name) ?? 0;
+  }
+  async delete(name: string): Promise<void> {
+    this.events.push({ kind: "delete", arg: name });
+    const resolve = this.#pendingExecs.get(name);
+    if (resolve !== undefined) {
+      this.#pendingExecs.delete(name);
+      resolve(130);
+    }
+  }
+
+  kinds(kind: string): string[] {
+    return this.events.filter((e) => e.kind === kind).map((e) => e.arg);
+  }
+}
+
+const INCUS_CONFIG = `
+build:
+  dockerfile: ./Dockerfile.build
+job:
+  image: images:debian/12
+  runtime: incus
+  depends: build
+  command:
+    - apt-get update
+    - run-tests
+`;
+
+test("an incus step launches one instance, execs each command and deletes it", async () => {
+  const docker = new FakeDocker();
+  const incus = new FakeIncus(docker.events); // shared timeline
+  const { ok } = await runPipeline(parseConfig(INCUS_CONFIG, "/work"), {
+    docker,
+    incus,
+    ...base,
+  });
+
+  assert.equal(ok, true);
+  // The docker dependency builds first, then the incus instance launches.
+  assert.ok(docker.at("build:dockerci/build:net") < docker.at("launch:net-job"));
+  // One instance for the whole step; both commands exec inside it in order,
+  // with no docker-style commit/snapshot machinery.
+  assert.deepEqual(incus.kinds("launch"), ["net-job"]);
+  assert.deepEqual(incus.kinds("exec"), ["net-job", "net-job"]);
+  assert.deepEqual(incus.execCommands, [["apt-get", "update"], ["run-tests"]]);
+  assert.deepEqual(docker.kinds("commit"), []);
+  assert.deepEqual(incus.kinds("delete"), ["net-job"]);
+  // The step never touches docker: nothing pulled, no container run.
+  assert.deepEqual(docker.kinds("pull"), []);
+  assert.deepEqual(docker.kinds("run"), []);
+});
+
+test("an incus step passes its image, environment and ports to incus, not docker", async () => {
+  const config = parseConfig(
+    `
+job:
+  image: images:alpine/3.20
+  runtime: incus
+  environment:
+    FOO: bar
+  ports: 8080
+  command: serve --check
+`,
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const incus = new FakeIncus();
+  const { ok } = await runPipeline(config, { docker, incus, ...base });
+
+  assert.equal(ok, true);
+  const launch = incus.launched.get("net-job")!;
+  assert.equal(launch.image, "images:alpine/3.20");
+  assert.deepEqual(launch.ports, [8080]);
+  // The environment rides on each exec, and the command is split into argv.
+  assert.deepEqual(incus.execEnvironments, [["FOO=bar"]]);
+  assert.deepEqual(incus.execCommands, [["serve", "--check"]]);
+  // The instance is never attached to the run's docker network.
+  assert.deepEqual(docker.kinds("run"), []);
+  assert.deepEqual(docker.kinds("startDetached"), []);
+});
+
+test("a failing incus command stops the chain, fails the step and deletes the instance", async () => {
+  const docker = new FakeDocker();
+  const incus = new FakeIncus();
+  incus.execExitCodes.set("net-job", 3);
+  const { ok, steps } = await runPipeline(parseConfig(INCUS_CONFIG, "/work"), {
+    docker,
+    incus,
+    ...base,
+  });
+
+  assert.equal(ok, false);
+  // Only the first command runs; the remaining commands are skipped.
+  assert.deepEqual(incus.kinds("exec"), ["net-job"]);
+  // The instance is still deleted and the docker network torn down.
+  assert.deepEqual(incus.kinds("delete"), ["net-job"]);
+  assert.deepEqual(docker.kinds("removeNetwork"), ["net"]);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "failure");
+});
+
+test("an incus step with no command still launches (validating the image) and deletes", async () => {
+  const config = parseConfig(
+    "job:\n  image: images:debian/12\n  runtime: incus",
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const incus = new FakeIncus();
+  const { ok } = await runPipeline(config, { docker, incus, ...base });
+
+  assert.equal(ok, true);
+  assert.deepEqual(incus.kinds("launch"), ["net-job"]);
+  assert.deepEqual(incus.kinds("exec"), []);
+  assert.deepEqual(incus.kinds("delete"), ["net-job"]);
+});
+
+test("aborting force-deletes a running incus instance", async () => {
+  const config = parseConfig(
+    "job:\n  image: images:debian/12\n  runtime: incus\n  command: serve",
+    "/work",
+  );
+  const controller = new AbortController();
+  const docker = new FakeDocker();
+  const incus = new FakeIncus();
+  // The exec runs indefinitely; fire the "Ctrl-C" once it is in flight.
+  incus.hangExec.add("net-job");
+  incus.onExec = () => queueMicrotask(() => controller.abort());
+
+  const { ok, steps } = await runPipeline(config, {
+    docker,
+    incus,
+    ...base,
+    signal: controller.signal,
+  });
+
+  assert.equal(ok, false);
+  assert.ok(incus.kinds("delete").includes("net-job"), "instance deleted");
+  assert.deepEqual(docker.kinds("removeNetwork"), ["net"]);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "failure");
+});
+
+test("a quiet incus step suppresses the echo but its output is still captured", async () => {
+  const config = parseConfig(
+    "job:\n  image: images:debian/12\n  runtime: incus\n  command: go\n  quiet: true",
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const incus = new FakeIncus();
+  const { steps } = await runPipeline(config, {
+    docker,
+    incus,
+    ...base,
+    captureOutput: true,
+  });
+
+  assert.equal(incus.quietByName.get("net-job"), true);
+  const output = steps.find((s) => s.name === "job")!.output;
+  assert.match(output, /launched net-job/);
+  assert.match(output, /exec output of net-job/);
+});
+
+test("an instance name unsafe for incus is sanitised", async () => {
+  const config = parseConfig(
+    "my_job:\n  image: images:debian/12\n  runtime: incus\n  command: go",
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const incus = new FakeIncus();
+  const { ok } = await runPipeline(config, { docker, incus, ...base });
+
+  assert.equal(ok, true);
+  // docker would accept `net-my_job`; incus instance names cannot contain `_`.
+  assert.deepEqual(incus.kinds("launch"), ["net-my-job"]);
+  assert.deepEqual(incus.kinds("delete"), ["net-my-job"]);
 });

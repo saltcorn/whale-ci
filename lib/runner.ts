@@ -7,6 +7,7 @@ import {
   type RunOptions,
   splitCommand,
 } from "./docker.ts";
+import { CliIncusClient, type IncusClient, instanceName } from "./incus.ts";
 import type { StepReport, StepStatus } from "./report.ts";
 import { runScheduled } from "./schedule.ts";
 import type { Config, Step } from "./types.ts";
@@ -14,6 +15,8 @@ import type { Config, Step } from "./types.ts";
 export interface RunnerOptions {
   /** Docker client to use; defaults to the real `docker` CLI. */
   docker?: DockerClient;
+  /** Incus client for `runtime: incus` steps; defaults to the real `incus` CLI. */
+  incus?: IncusClient;
   /** Network name; defaults to a unique per-run name. */
   network?: string;
   /** Sink for progress messages; defaults to console.error. */
@@ -37,6 +40,11 @@ export interface RunnerOptions {
    * removed before the run returns (with `ok: false`).
    */
   signal?: AbortSignal;
+  /**
+   * Maximum number of test (non-service) containers running in parallel.
+   * Service containers do not count toward the limit. Defaults to 4.
+   */
+  maxConcurrency?: number;
 }
 
 /** Outcome of a whole pipeline run. */
@@ -60,7 +68,8 @@ interface StepRecord {
 /**
  * Build every image and run the CI pipeline described by `config`.
  *
- * Steps are processed concurrently where their `depends` allow. A step marked
+ * Steps are processed concurrently where their `depends` allow, with at most
+ * `maxConcurrency` non-service steps in flight at once. A step marked
  * `service: true` is started detached and kept running only while at least one
  * other step still depends on it; it is stopped as soon as the last such
  * dependent finishes. A step that is not a service runs its `command` to
@@ -77,6 +86,7 @@ export async function runPipeline(
   options: RunnerOptions = {},
 ): Promise<PipelineResult> {
   const docker = options.docker ?? new CliDockerClient();
+  const incus = options.incus ?? new CliIncusClient();
   const network = options.network ?? `dockerci-${process.pid}-${Date.now()}`;
   // The network name is unique per run, so it doubles as the run id that scopes
   // this run's built image tags away from any concurrent run's.
@@ -106,6 +116,8 @@ export async function runPipeline(
   // Names of job containers currently running, so an interrupted run can force
   // them down (services are tracked via `started`/`stopped`).
   const liveContainers = new Set<string>();
+  // Incus instances currently running, force-deleted on an interrupted run.
+  const liveInstances = new Set<string>();
   // Image tags this run has built, removed during teardown so per-run images do
   // not accumulate on the host.
   const builtImages = new Set<string>();
@@ -215,6 +227,46 @@ export async function runPipeline(
       for (const tag of intermediates) {
         await docker.removeImage(tag);
       }
+    }
+  };
+
+  /**
+   * Run a `runtime: incus` step. An ephemeral incus instance is launched from
+   * the step's image (pulling it on first use), each command runs inside it via
+   * `incus exec` — the instance keeps running between commands, so filesystem
+   * state carries forward without any commit/snapshot dance — and the instance
+   * is always deleted afterwards. Incus instances never join the run's docker
+   * network: there is no shared network between incus and docker steps.
+   */
+  const runIncusStep = async (step: Step): Promise<void> => {
+    const sink = sinkFor(step.name);
+    const name = instanceName(containerName(step.name));
+    liveInstances.add(name);
+    try {
+      log(`Launching ${step.name} (${step.image}) with incus`);
+      await incus.launch(
+        { image: step.image!, name, ports: step.ports },
+        sink,
+        step.quiet,
+      );
+      for (const command of step.command ?? []) {
+        log(`Running ${step.name}: ${command}`);
+        const argv = splitCommand(command);
+        if (argv === undefined) continue;
+        const code = await incus.exec(
+          name,
+          argv,
+          step.environment,
+          sink,
+          step.quiet,
+        );
+        if (code !== 0) {
+          throw new Error(`Step "${step.name}" failed with exit code ${code}`);
+        }
+      }
+    } finally {
+      await incus.delete(name);
+      liveInstances.delete(name);
     }
   };
 
@@ -369,6 +421,12 @@ export async function runPipeline(
       }
 
       await withTimeout(step, async () => {
+        // An incus step cannot be a service (enforced at parse time), so the
+        // runtime split only exists on this job path.
+        if (step.runtime === "incus") {
+          await runIncusStep(step);
+          return;
+        }
         await buildOrPull(step);
         if (step.command !== undefined) {
           await runCommands(step, step.command);
@@ -399,6 +457,11 @@ export async function runPipeline(
         liveContainers.delete(name);
         await docker.stop(name);
       }
+      // Likewise any incus instance an interrupted or timed-out step left behind.
+      for (const name of [...liveInstances]) {
+        liveInstances.delete(name);
+        await incus.delete(name);
+      }
       // Drop this run's built images now that no container references them.
       for (const tag of builtImages) {
         await docker.removeImage(tag);
@@ -419,7 +482,7 @@ export async function runPipeline(
 
   await docker.createNetwork(network);
   try {
-    await runScheduled(config, processStep, signal);
+    await runScheduled(config, processStep, signal, options.maxConcurrency ?? 4);
   } catch (err) {
     ok = false;
     log(`Pipeline failed: ${(err as Error).message}`);

@@ -549,3 +549,86 @@ test("rejects non-integer ports", () => {
     /positive integers/,
   );
 });
+
+test("runtime is parsed and defaults to docker", () => {
+  const incus = parseConfig("a:\n  image: images:debian/12\n  runtime: incus", "/w")
+    .steps.get("a")!;
+  assert.equal(incus.runtime, "incus");
+  const plain = parseConfig("a:\n  image: x", "/w").steps.get("a")!;
+  assert.equal(plain.runtime, "docker");
+  const explicit = parseConfig("a:\n  image: x\n  runtime: docker", "/w")
+    .steps.get("a")!;
+  assert.equal(explicit.runtime, "docker");
+});
+
+test("runtime rejects values other than docker or incus", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  runtime: podman", "/w"),
+    /key "runtime" must be "docker" or "incus"/,
+  );
+});
+
+test("an incus step cannot be a service", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  runtime: incus\n  service: true", "/w"),
+    /uses the incus runtime and cannot be a service/,
+  );
+});
+
+test("an incus step cannot build from a dockerfile", () => {
+  assert.throws(
+    () => parseConfig("a:\n  dockerfile: ./D\n  runtime: incus", "/w"),
+    /uses the incus runtime and cannot build from a "dockerfile"/,
+  );
+});
+
+test("an incus step cannot depend on a service", () => {
+  const yaml = `
+db:
+  image: postgres
+  service: true
+job:
+  image: images:debian/12
+  runtime: incus
+  depends: db
+`;
+  assert.throws(
+    () => parseConfig(yaml, "/w"),
+    /Step "job" uses the incus runtime and cannot depend on service "db"/,
+  );
+});
+
+test("an incus step may depend on (and be depended on by) docker jobs", () => {
+  const yaml = `
+build:
+  dockerfile: ./D
+job:
+  image: images:debian/12
+  runtime: incus
+  depends: build
+  command: run
+verify:
+  image: alpine
+  depends: job
+  command: check
+`;
+  const config = parseConfig(yaml, "/w");
+  assert.deepEqual(config.steps.get("job")!.depends, ["build"]);
+  assert.deepEqual(config.steps.get("verify")!.depends, ["job"]);
+});
+
+test("an incus step's image is never resolved to a build step's image", () => {
+  // For a docker step, `image: build` would reuse the build step's generated
+  // image; an incus step cannot run a docker image, so the name is left alone.
+  const yaml = `
+build:
+  dockerfile: ./D
+job:
+  image: build
+  runtime: incus
+  command: run
+`;
+  const job = parseConfig(yaml, "/w").steps.get("job")!;
+  assert.equal(job.imageFrom, undefined);
+  assert.deepEqual(job.depends, []);
+});

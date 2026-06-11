@@ -2,7 +2,18 @@
 import { realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { binary, command, flag, option, optional, positional, run, string } from "cmd-ts";
+import {
+  binary,
+  command,
+  extendType,
+  flag,
+  number,
+  option,
+  optional,
+  positional,
+  run,
+  string,
+} from "cmd-ts";
 import { loadConfig } from "../lib/config.ts";
 import { CliGitClient } from "../lib/git.ts";
 import { GitHubStatusReporter } from "../lib/github.ts";
@@ -10,6 +21,16 @@ import { renderReport } from "../lib/report.ts";
 import { runPipeline } from "../lib/runner.ts";
 import { CiServer, serverConfigFromEnv, verifyCheckout } from "../lib/server.ts";
 import { ConfigError } from "../lib/types.ts";
+
+/** A whole number of containers, at least one. */
+const positiveInteger = extendType(number, {
+  async from(value) {
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error("must be a positive integer");
+    }
+    return value;
+  },
+});
 
 /**
  * The whale-ci command. cmd-ts handles `--help`/`-h` and argument validation
@@ -32,6 +53,16 @@ export const app = command({
         "Write a self-contained HTML report (per-step output, pass/fail and " +
         "duration) to this file.",
     }),
+    maxConcurrency: option({
+      type: positiveInteger,
+      long: "max-concurrency",
+      defaultValue: () => 4,
+      defaultValueIsSerializable: true,
+      description:
+        "Maximum number of test containers running in parallel, shared " +
+        "jointly by docker and incus steps (service containers do not count " +
+        "toward the limit).",
+    }),
     serve: flag({
       long: "serve",
       description:
@@ -47,15 +78,19 @@ export const app = command({
       description: "Path to the YAML pipeline configuration file.",
     }),
   },
-  handler: ({ output, serve, configFile }) =>
-    serve ? runServe(configFile) : runCli(configFile, output),
+  handler: ({ output, serve, configFile, maxConcurrency }) =>
+    serve ? runServe(configFile) : runCli(configFile, maxConcurrency, output),
 });
 
 /**
  * Load the config, run the pipeline and (optionally) write the HTML report.
  * Returns the process exit code: 0 on success, 1 on failure, 130 if interrupted.
  */
-async function runCli(configFile: string, output?: string): Promise<number> {
+async function runCli(
+  configFile: string,
+  maxConcurrency: number,
+  output?: string,
+): Promise<number> {
   try {
     const config = await loadConfig(configFile);
 
@@ -81,6 +116,7 @@ async function runCli(configFile: string, output?: string): Promise<number> {
       result = await runPipeline(config, {
         captureOutput: output !== undefined,
         signal: controller.signal,
+        maxConcurrency,
       });
     } finally {
       process.removeListener("SIGINT", onSigint);

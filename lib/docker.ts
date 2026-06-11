@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { execTool, type ExecToolOptions, type OutputSink } from "./proc.ts";
 import type { Step } from "./types.ts";
+
+export type { OutputSink };
 
 /** Options describing how to launch a step's container. */
 export interface RunOptions {
@@ -25,13 +28,6 @@ export interface RunOptions {
    */
   keep?: boolean;
 }
-
-/**
- * Receives chunks of combined stdout/stderr from a docker command, so a step's
- * output can be captured for the HTML report. When no sink is given the command
- * streams straight to the terminal instead.
- */
-export type OutputSink = (chunk: string) => void;
 
 /** Handle for a live log follower started by {@link DockerClient.followLogs}. */
 export interface LogFollower {
@@ -396,58 +392,8 @@ export class CliDockerClient implements DockerClient {
     }
   }
 
-  /**
-   * Spawn `docker` with the given args. With a `sink` the output is piped and
-   * forwarded to the sink (for the report), and also echoed to the terminal
-   * unless `quiet`. Without a sink, stdio is inherited so docker streams
-   * directly — or discarded entirely when `quiet`. Resolves with the exit code;
-   * rejects on non-zero unless `allowNonZero` is set.
-   */
-  #exec(
-    args: string[],
-    opts: {
-      allowNonZero?: boolean;
-      quiet?: boolean;
-      sink?: OutputSink;
-      input?: string;
-    } = {},
-  ): Promise<number> {
-    return new Promise((resolvePromise, reject) => {
-      const streamMode = opts.sink ? "pipe" : opts.quiet ? "ignore" : "inherit";
-      // Pipe stdin only when there is input to write (e.g. a Dockerfile fed in
-      // on `-f -`); otherwise leave it as the shared stream mode.
-      const stdin = opts.input !== undefined ? "pipe" : streamMode;
-      const child = spawn(this.#docker, args, {
-        stdio: [stdin, streamMode, streamMode],
-      });
-      if (opts.input !== undefined) {
-        child.stdin!.end(opts.input);
-      }
-
-      if (opts.sink) {
-        const tee = (
-          stream: NodeJS.ReadableStream | null,
-          out: NodeJS.WriteStream,
-        ): void => {
-          stream?.on("data", (chunk: Buffer) => {
-            const text = chunk.toString();
-            if (!opts.quiet) out.write(text);
-            opts.sink!(text);
-          });
-        };
-        tee(child.stdout, process.stdout);
-        tee(child.stderr, process.stderr);
-      }
-
-      child.on("error", reject);
-      child.on("close", (code) => {
-        const exitCode = code ?? 1;
-        if (exitCode !== 0 && !opts.allowNonZero) {
-          reject(new Error(`docker ${args.join(" ")} exited with ${exitCode}`));
-        } else {
-          resolvePromise(exitCode);
-        }
-      });
-    });
+  /** Spawn `docker` with the given args; see {@link execTool}. */
+  #exec(args: string[], opts: ExecToolOptions = {}): Promise<number> {
+    return execTool(this.#docker, args, opts);
   }
 }

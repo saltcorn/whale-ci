@@ -47,6 +47,20 @@ The valid keys in each section are:
   that step's generated image is used instead of pulling from the registry, and
   an implicit dependency on that step is added (even without `depends`).
   Otherwise the image is pulled from Docker Hub as usual.
+* runtime: `docker` or `incus` (default `docker`). The container runtime the
+  step runs under. A step with `runtime: incus` runs in an ephemeral [incus]
+  (https://linuxcontainers.org/incus/) instance using the `incus` CLI, which is
+  assumed to be installed and usable by the current user: the instance is
+  launched from the step's `image` (an incus image reference such as
+  `images:debian/12`), each command runs inside it with `incus exec` (the
+  instance's filesystem persists between commands), and the instance is deleted
+  when the step finishes. An incus step must use `image` — incus cannot build
+  a `dockerfile` — and its image always refers to an incus image, never to
+  another step's built image. Incus steps cannot be services and cannot depend
+  on services, because there is no shared network between incus and docker
+  steps (see "Networking between steps" below). They may otherwise depend on
+  and be depended on by any non-service step, and `--max-concurrency` applies
+  jointly across both runtimes.
 * service: `true` or `false` (default `false`). A service runs in the background
   for as long as at least one other step still depends on it, and is stopped as
   soon as it is no longer required. A non-service runs its command to completion.
@@ -82,8 +96,8 @@ The valid keys in each section are:
 
 # Networking between steps
 
-All steps run on a single Docker network, and each container is reachable from
-the others by its **step name as a hostname**. To connect from one step to
+All docker steps run on a single Docker network, and each container is
+reachable from the others by its **step name as a hostname**. To connect from one step to
 another, use the target step's name as the host — typically through an
 environment variable — and `depends` on it so it is started first:
 
@@ -108,6 +122,10 @@ app:
 Inside the `app` container, connecting to host `database` reaches the `database`
 step's container. Use `depends` (and, for services that take a moment to start,
 `ready-on`) so the service is up before the client tries to connect.
+
+Steps with `runtime: incus` never join this network: there is **no shared
+network between incus and docker steps**, which is why an incus step can
+neither be a service nor depend on one.
 
 # Command-line interface
 
@@ -134,6 +152,12 @@ At the end, whether the test succeeded or not, all running containers are stoppe
   the captured build and container-run output.
 
 `npx whale-ci -o report.html ci.yml`
+
+* `--max-concurrency <n>`: the maximum number of test containers that run in
+  parallel. The limit is shared jointly by docker and incus steps; service
+  containers do not count toward it. Defaults to 4.
+
+`npx whale-ci --max-concurrency 8 ci.yml`
 
 * `--serve`: run as a CI server instead of running once. This starts an HTTP
   server that acts as the backend for a GitHub push webhook (see below).

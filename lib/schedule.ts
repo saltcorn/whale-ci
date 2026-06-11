@@ -10,6 +10,10 @@ export function prerequisites(step: Step): string[] {
  * independent steps concurrently. Each step is handed to `process` only after
  * all of its prerequisites have finished successfully.
  *
+ * At most `maxConcurrency` non-service steps are in flight at once; service
+ * steps do not count toward the limit (their `process` call only covers
+ * startup, and the container keeps running outside the scheduler's view).
+ *
  * If any step rejects, no new steps are started and the returned promise
  * rejects once the already-running steps have settled.
  *
@@ -20,6 +24,7 @@ export async function runScheduled(
   config: Config,
   process: (step: Step) => Promise<void>,
   signal?: AbortSignal,
+  maxConcurrency = Infinity,
 ): Promise<string[]> {
   const remaining = new Map<string, Set<string>>();
   for (const [name, step] of config.steps) {
@@ -29,6 +34,8 @@ export async function runScheduled(
   const completed = new Set<string>();
   const started = new Set<string>();
   const inFlight = new Map<string, Promise<void>>();
+  // Non-service steps currently in flight, capped at maxConcurrency.
+  let runningJobs = 0;
   let failure: unknown;
 
   const launchReady = (): void => {
@@ -38,8 +45,10 @@ export async function runScheduled(
     for (const [name, deps] of remaining) {
       if (started.has(name)) continue;
       if (deps.size > 0) continue;
-      started.add(name);
       const step = config.steps.get(name)!;
+      if (!step.service && runningJobs >= maxConcurrency) continue;
+      if (!step.service) runningJobs += 1;
+      started.add(name);
       const task = process(step).then(
         () => {
           completed.add(name);
@@ -65,6 +74,7 @@ export async function runScheduled(
       ),
     );
     inFlight.delete(settled);
+    if (!config.steps.get(settled)!.service) runningJobs -= 1;
 
     if (failure === undefined && completed.has(settled)) {
       remaining.delete(settled);

@@ -27,7 +27,38 @@ test("parses a lone config file", async () => {
     configFile: "ci.yml",
     output: undefined,
     serve: false,
+    maxConcurrency: 4,
   });
+});
+
+test("parses --max-concurrency and defaults it to 4", async () => {
+  assert.equal((await parseArgs(["ci.yml"])).maxConcurrency, 4);
+  assert.equal(
+    (await parseArgs(["--max-concurrency", "8", "ci.yml"])).maxConcurrency,
+    8,
+  );
+  assert.equal(
+    (await parseArgs(["ci.yml", "--max-concurrency=1"])).maxConcurrency,
+    1,
+  );
+});
+
+test("a non-numeric --max-concurrency is an error", async () => {
+  assert.notEqual(
+    (await parse(app, ["--max-concurrency", "lots", "ci.yml"]))._tag,
+    "ok",
+  );
+});
+
+test("a zero or negative --max-concurrency is an error", async () => {
+  assert.match(
+    await parseError(["--max-concurrency", "0", "ci.yml"]),
+    /positive integer/,
+  );
+  assert.match(
+    await parseError(["--max-concurrency", "-2", "ci.yml"]),
+    /positive integer/,
+  );
 });
 
 test("parses the --serve flag", async () => {

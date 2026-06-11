@@ -1,3 +1,6 @@
+/** The container runtime a step executes under. */
+export type Runtime = "docker" | "incus";
+
 /**
  * A single CI step, as declared in one section of the YAML config file.
  *
@@ -12,6 +15,14 @@ export interface Step {
   dockerfile?: string;
   /** Image to pull when there is no Dockerfile. */
   image?: string;
+  /**
+   * The runtime that executes the step: `"docker"` (the default) or `"incus"`.
+   * An incus step runs in an ephemeral incus instance via the `incus` CLI. It
+   * must use `image` (incus cannot build Dockerfiles), and it cannot be or
+   * depend on a service: incus instances never join the run's docker network,
+   * so there is no shared network between the two runtimes.
+   */
+  runtime: Runtime;
   /**
    * When `image` names another step that builds its own image, this holds that
    * step's name. The container then runs that step's generated image instead of

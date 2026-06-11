@@ -19,6 +19,14 @@ export type {
   OutputSink,
   RunOptions,
 } from "./docker.ts";
+export {
+  CliIncusClient,
+  execArgs,
+  instanceName,
+  launchArgs,
+  proxyDeviceArgs,
+} from "./incus.ts";
+export type { IncusClient, IncusLaunchOptions } from "./incus.ts";
 export { formatDuration, renderReport } from "./report.ts";
 export type { ReportMeta, StepReport, StepStatus } from "./report.ts";
 export { prerequisites, runScheduled } from "./schedule.ts";
@@ -45,4 +53,9 @@ export {
   verifyCheckout,
 } from "./server.ts";
 export type { CiServerOptions, RunJob, ServerEnv } from "./server.ts";
-export { type Config, ConfigError, type Step } from "./types.ts";
+export {
+  type Config,
+  ConfigError,
+  type Runtime,
+  type Step,
+} from "./types.ts";
