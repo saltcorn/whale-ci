@@ -119,6 +119,17 @@ class FakeDocker implements DockerClient {
   async commit(container: string, tag: string): Promise<void> {
     this.events.push({ kind: "commit", arg: `${container}->${tag}` });
   }
+  async tagImage(source: string, target: string): Promise<void> {
+    this.events.push({ kind: "tagImage", arg: `${source}->${target}` });
+  }
+  async push(
+    image: string,
+    sink?: OutputSink,
+    _quiet?: boolean,
+  ): Promise<void> {
+    this.events.push({ kind: "push", arg: image });
+    sink?.(`pushing ${image}\n`);
+  }
   async removeImage(tag: string): Promise<void> {
     this.events.push({ kind: "removeImage", arg: tag });
   }
@@ -416,7 +427,7 @@ test("only-if skips the step when the check exits non-zero", async () => {
   const checks: string[] = [];
   const shell = async (command: string) => {
     checks.push(command);
-    return 1;
+    return { code: 1, stdout: "" };
   };
   const { ok, steps } = await runPipeline(config, { docker, ...base, shell });
 
@@ -437,7 +448,7 @@ test("only-if runs the step when the check exits zero", async () => {
   const { ok, steps } = await runPipeline(config, {
     docker,
     ...base,
-    shell: async () => 0,
+    shell: async () => ({ code: 0, stdout: "" }),
   });
 
   assert.equal(ok, true);
@@ -453,7 +464,7 @@ test("steps without only-if never invoke the shell", async () => {
     ...base,
     shell: async (command) => {
       checks.push(command);
-      return 0;
+      return { code: 0, stdout: "" };
     },
   });
   assert.deepEqual(checks, []);
@@ -482,7 +493,7 @@ test:
   const { ok, steps } = await runPipeline(config, {
     docker,
     ...base,
-    shell: async () => 1,
+    shell: async () => ({ code: 1, stdout: "" }),
   });
 
   assert.equal(ok, true);
@@ -493,6 +504,138 @@ test:
   // The service the skipped step depended on is stopped, not left running.
   assert.ok(docker.at("stop:net-db") !== -1, "service db is stopped");
   assert.ok(docker.at("stop:net-db") < docker.at("removeNetwork:net"));
+});
+
+const PUSH_CONFIG = (push: string) => `
+job:
+  dockerfile: ./Dockerfile
+  command: make
+  push:
+${push}
+`;
+
+test("push tags and pushes the built image after the step succeeds", async () => {
+  const config = parseConfig(
+    PUSH_CONFIG("    image: myorg/myapp\n    tag: v1"),
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const { ok } = await runPipeline(config, { docker, ...base });
+
+  assert.equal(ok, true);
+  assert.deepEqual(docker.kinds("tagImage"), [
+    "dockerci/job:net->myorg/myapp:v1",
+  ]);
+  assert.deepEqual(docker.kinds("push"), ["myorg/myapp:v1"]);
+  // The push happens only after the step's command has succeeded.
+  assert.ok(docker.at("run:job") < docker.at("push:myorg/myapp:v1"));
+});
+
+test("push tag defaults to latest", async () => {
+  const config = parseConfig(PUSH_CONFIG("    image: myorg/myapp"), "/work");
+  const docker = new FakeDocker();
+  const { ok } = await runPipeline(config, { docker, ...base });
+  assert.equal(ok, true);
+  assert.deepEqual(docker.kinds("push"), ["myorg/myapp:latest"]);
+});
+
+test("a $(...) push tag is evaluated and its output becomes the tag", async () => {
+  const config = parseConfig(
+    PUSH_CONFIG("    image: myorg/myapp\n    tag: $(git rev-parse --short HEAD)"),
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const commands: string[] = [];
+  const { ok } = await runPipeline(config, {
+    docker,
+    ...base,
+    shell: async (command) => {
+      commands.push(command);
+      return { code: 0, stdout: "abc1234\n" };
+    },
+  });
+
+  assert.equal(ok, true);
+  assert.deepEqual(commands, ["git rev-parse --short HEAD"]);
+  assert.deepEqual(docker.kinds("push"), ["myorg/myapp:abc1234"]);
+});
+
+test("a failing $(...) push tag command fails the step", async () => {
+  const config = parseConfig(
+    PUSH_CONFIG("    image: myorg/myapp\n    tag: $(false)"),
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const { ok, steps } = await runPipeline(config, {
+    docker,
+    ...base,
+    shell: async () => ({ code: 1, stdout: "" }),
+  });
+
+  assert.equal(ok, false);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "failure");
+  assert.deepEqual(docker.kinds("push"), []);
+});
+
+test("push only-if skips the push without failing the step", async () => {
+  const config = parseConfig(
+    PUSH_CONFIG(
+      "    image: myorg/myapp\n    only-if: test \"$BRANCH\" = main",
+    ),
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const checks: string[] = [];
+  const { ok, steps } = await runPipeline(config, {
+    docker,
+    ...base,
+    shell: async (command) => {
+      checks.push(command);
+      return { code: 1, stdout: "" };
+    },
+  });
+
+  assert.equal(ok, true);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "success");
+  assert.deepEqual(checks, ['test "$BRANCH" = main']);
+  assert.deepEqual(docker.kinds("push"), []);
+  assert.deepEqual(docker.kinds("tagImage"), []);
+});
+
+test("a failing step is not pushed", async () => {
+  const config = parseConfig(
+    PUSH_CONFIG("    image: myorg/myapp\n    tag: v1"),
+    "/work",
+  );
+  const docker = new FakeDocker();
+  docker.runExitCodes.set("job", 2);
+  const { ok } = await runPipeline(config, { docker, ...base });
+
+  assert.equal(ok, false);
+  assert.deepEqual(docker.kinds("push"), []);
+});
+
+test("a service with push is pushed once it has started", async () => {
+  const config = parseConfig(
+    `
+api:
+  dockerfile: ./Dockerfile.api
+  service: true
+  push:
+    image: myorg/api
+test:
+  image: alpine
+  command: runtests
+  depends: api
+`,
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const { ok } = await runPipeline(config, { docker, ...base });
+
+  assert.equal(ok, true);
+  assert.deepEqual(docker.kinds("push"), ["myorg/api:latest"]);
+  assert.ok(docker.at("startDetached:api") < docker.at("push:myorg/api:latest"));
 });
 
 test("a step that exceeds its timeout-minutes fails and is torn down", async () => {

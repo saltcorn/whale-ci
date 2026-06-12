@@ -19,6 +19,35 @@ export interface ExecToolOptions {
   input?: string;
 }
 
+/** Outcome of a host shell command run with {@link runShell}. */
+export interface ShellResult {
+  /** The command's exit code. */
+  code: number;
+  /** Everything the command wrote to stdout (stderr is discarded). */
+  stdout: string;
+}
+
+/**
+ * Run a command on the host through `bash -c`, capturing its stdout. Used for
+ * step `only-if` checks (where only the exit code matters) and for `$(...)`
+ * push tags (where the output becomes the tag). Never echoes to the terminal.
+ */
+export function runShell(command: string): Promise<ShellResult> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn("bash", ["-c", command], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let stdout = "";
+    child.stdout!.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      resolvePromise({ code: code ?? 1, stdout });
+    });
+  });
+}
+
 /**
  * Spawn `binary` with the given args. With a `sink` the output is piped and
  * forwarded to the sink (for the report), and also echoed to the terminal

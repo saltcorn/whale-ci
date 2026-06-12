@@ -84,6 +84,28 @@ The valid keys in each section are:
   skipped. A skipped step still counts as completed, so steps that depend on
   it run as usual — note that dependents of a skipped *service* will not find
   it running. The command's output is discarded.
+* push: a mapping (only valid on a step with a `dockerfile`). After the step
+  succeeds, its built image is pushed to Docker Hub. The push happens with the
+  host's docker credentials, so `docker login` must already have been run.
+  Subkeys:
+  * image: the repository to push to, e.g. `myorg/myapp`. Required.
+  * tag: the tag to push as; defaults to `latest`. A value of the form
+    `$(command)` is evaluated as a shell command on the host and its trimmed
+    output becomes the tag (for example `tag: $(git rev-parse --short HEAD)`).
+    If the command fails or prints nothing, the step fails.
+  * only-if: a bash command evaluated on the host after the step succeeds. The
+    image is pushed only when it exits zero; a non-zero exit skips the push
+    without failing the step (useful to push only from a particular branch).
+
+  ```yaml
+  build:
+      dockerfile: ./Dockerfile
+      command: make test
+      push:
+          image: myorg/myapp
+          tag: $(git rev-parse --short HEAD)
+          only-if: test "$(git branch --show-current)" = main
+  ```
 * ready-on: a string (only valid on a service). Any step that depends on this
   service is held until this exact string appears in the service's output, so
   you can wait for a slow-starting service to finish booting (for example a

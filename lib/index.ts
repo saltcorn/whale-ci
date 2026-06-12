@@ -53,9 +53,11 @@ export {
   verifyCheckout,
 } from "./server.ts";
 export type { CiServerOptions, RunJob, ServerEnv } from "./server.ts";
+export { runShell, type ShellResult } from "./proc.ts";
 export {
   type Config,
   ConfigError,
+  type PushConfig,
   type Runtime,
   type Step,
 } from "./types.ts";

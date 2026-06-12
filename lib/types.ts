@@ -89,6 +89,32 @@ export interface Step {
    * false.
    */
   quiet: boolean;
+  /**
+   * When set, the step's built image is pushed to docker hub after the step
+   * succeeds. Only valid on a step with a `dockerfile`.
+   */
+  push?: PushConfig;
+}
+
+/**
+ * The `push:` section of a step: where to push the step's built image once the
+ * step has succeeded. Only valid on a step that builds from a `dockerfile`.
+ */
+export interface PushConfig {
+  /** The repository to push to, e.g. `myorg/myapp`. */
+  image: string;
+  /**
+   * The tag to push as. A value of the form `$(command)` is evaluated as a
+   * shell command on the host and its trimmed stdout becomes the tag.
+   * Undefined means `latest`.
+   */
+  tag?: string;
+  /**
+   * A bash command evaluated on the host after the step succeeds. The image is
+   * pushed only when it exits zero; a non-zero exit skips the push without
+   * failing the step. Undefined means always push.
+   */
+  onlyIf?: string;
 }
 
 /** A fully parsed and validated configuration file. */

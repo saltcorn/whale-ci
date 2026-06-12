@@ -2,7 +2,13 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { firstFromImage } from "./docker.ts";
-import { type Config, ConfigError, type Runtime, type Step } from "./types.ts";
+import {
+  type Config,
+  ConfigError,
+  type PushConfig,
+  type Runtime,
+  type Step,
+} from "./types.ts";
 
 /** Reads a Dockerfile's text given its path; injectable for testing. */
 export type DockerfileReader = (path: string) => Promise<string>;
@@ -19,6 +25,7 @@ const KNOWN_KEYS = new Set([
   "ports",
   "disable",
   "only-if",
+  "push",
   "ready-on",
   "delay",
   "timeout-minutes",
@@ -165,6 +172,13 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     );
   }
 
+  const push = optionalPush(raw["push"], name);
+  if (push !== undefined && dockerfile === undefined) {
+    throw new ConfigError(
+      `Step "${name}" sets "push" but has no "dockerfile"; only built images can be pushed`,
+    );
+  }
+
   const runtime = optionalRuntime(raw["runtime"], name);
   if (runtime === "incus") {
     if (service) {
@@ -194,6 +208,36 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     delay: optionalDelay(raw["delay"], name),
     timeoutMinutes: optionalTimeoutMinutes(raw["timeout-minutes"], name),
     quiet: optionalBoolean(raw["quiet"], name, "quiet") ?? false,
+    push,
+  };
+}
+
+/** Subkeys accepted inside a step's `push` section. Anything else is an error. */
+const KNOWN_PUSH_KEYS = new Set(["image", "tag", "only-if"]);
+
+/** Validate and normalise a step's optional `push:` section. */
+function optionalPush(value: unknown, step: string): PushConfig | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isPlainObject(value)) {
+    throw new ConfigError(`Step "${step}" key "push" must be a mapping`);
+  }
+  for (const key of Object.keys(value)) {
+    if (!KNOWN_PUSH_KEYS.has(key)) {
+      throw new ConfigError(
+        `Step "${step}" key "push" has unknown key "${key}"`,
+      );
+    }
+  }
+  const image = optionalString(value["image"], step, "push.image");
+  if (image === undefined) {
+    throw new ConfigError(`Step "${step}" key "push" must set "image"`);
+  }
+  return {
+    image,
+    tag: optionalString(value["tag"], step, "push.tag"),
+    onlyIf: optionalString(value["only-if"], step, "push.only-if"),
   };
 }
 

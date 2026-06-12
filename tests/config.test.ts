@@ -445,6 +445,74 @@ test("only-if must be a string", () => {
   );
 });
 
+test("push is parsed with its image, tag and only-if subkeys", () => {
+  const yaml = `
+a:
+  dockerfile: ./Dockerfile
+  push:
+    image: myorg/myapp
+    tag: $(git rev-parse --short HEAD)
+    only-if: test "$BRANCH" = main
+`;
+  const a = parseConfig(yaml, "/w").steps.get("a")!;
+  assert.deepEqual(a.push, {
+    image: "myorg/myapp",
+    tag: "$(git rev-parse --short HEAD)",
+    onlyIf: 'test "$BRANCH" = main',
+  });
+});
+
+test("push defaults to undefined, with optional tag and only-if", () => {
+  const without = parseConfig("a:\n  dockerfile: ./d", "/w").steps.get("a")!;
+  assert.equal(without.push, undefined);
+  const minimal = parseConfig(
+    "a:\n  dockerfile: ./d\n  push:\n    image: myorg/myapp",
+    "/w",
+  ).steps.get("a")!;
+  assert.deepEqual(minimal.push, {
+    image: "myorg/myapp",
+    tag: undefined,
+    onlyIf: undefined,
+  });
+});
+
+test("push must be a mapping with an image", () => {
+  assert.throws(
+    () => parseConfig("a:\n  dockerfile: ./d\n  push: myorg/myapp", "/w"),
+    /key "push" must be a mapping/,
+  );
+  assert.throws(
+    () => parseConfig("a:\n  dockerfile: ./d\n  push:\n    tag: v1", "/w"),
+    /key "push" must set "image"/,
+  );
+});
+
+test("push rejects unknown subkeys and non-string values", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "a:\n  dockerfile: ./d\n  push:\n    image: x\n    repo: y",
+        "/w",
+      ),
+    /key "push" has unknown key "repo"/,
+  );
+  assert.throws(
+    () =>
+      parseConfig(
+        "a:\n  dockerfile: ./d\n  push:\n    image: x\n    tag: 5",
+        "/w",
+      ),
+    /key "push.tag" must be a string/,
+  );
+});
+
+test("push requires the step to build from a dockerfile", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: alpine\n  push:\n    image: x", "/w"),
+    /sets "push" but has no "dockerfile"/,
+  );
+});
+
 test("delay is parsed as a number of seconds and defaults to undefined", () => {
   const withDelay = parseConfig("a:\n  image: x\n  delay: 5", "/w").steps.get("a")!;
   assert.equal(withDelay.delay, 5);

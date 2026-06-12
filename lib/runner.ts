@@ -8,7 +8,7 @@ import {
   splitCommand,
 } from "./docker.ts";
 import { CliIncusClient, type IncusClient, instanceName } from "./incus.ts";
-import { execTool } from "./proc.ts";
+import { runShell, type ShellResult } from "./proc.ts";
 import type { StepReport, StepStatus } from "./report.ts";
 import { runScheduled } from "./schedule.ts";
 import type { Config, Step } from "./types.ts";
@@ -30,11 +30,12 @@ export interface RunnerOptions {
   /** Sleep for a number of milliseconds; defaults to a real timer. Injectable for tests. */
   sleep?: (ms: number) => Promise<void>;
   /**
-   * Run a shell command on the host and resolve with its exit code; used to
-   * evaluate each step's `only-if` condition. Defaults to `bash -c` with the
-   * command's output discarded. Injectable for tests.
+   * Run a shell command on the host, resolving with its exit code and captured
+   * stdout; used for `only-if` conditions (step and push) and for `$(...)`
+   * push tags. Defaults to `bash -c` with stderr discarded. Injectable for
+   * tests.
    */
-  shell?: (command: string) => Promise<number>;
+  shell?: (command: string) => Promise<ShellResult>;
   /**
    * Schedule `fire` to run after `ms` milliseconds, returning a canceller that
    * prevents it from firing. Used to enforce per-step timeouts; defaults to
@@ -102,9 +103,7 @@ export async function runPipeline(
   const capture = options.captureOutput ?? false;
   const sleep = options.sleep ??
     ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const shell = options.shell ??
-    ((command: string) =>
-      execTool("bash", ["-c", command], { allowNonZero: true, quiet: true }));
+  const shell = options.shell ?? runShell;
   const timer = options.timer ??
     ((ms: number, fire: () => void) => {
       const handle = setTimeout(fire, ms);
@@ -312,6 +311,41 @@ export async function runPipeline(
     }
   };
 
+  /**
+   * Push a step's built image to docker hub, as configured by its `push:`
+   * section. The push `only-if` check failing skips the push without failing
+   * the step; a `$(...)` tag command failing (or yielding nothing) fails the
+   * step, since the image cannot be pushed as intended.
+   */
+  const pushBuiltImage = async (step: Step): Promise<void> => {
+    const push = step.push;
+    if (push === undefined) return;
+    if (push.onlyIf !== undefined && (await shell(push.onlyIf)).code !== 0) {
+      log(`Not pushing ${step.name} (push only-if check failed: ${push.onlyIf})`);
+      return;
+    }
+    let tag = push.tag ?? "latest";
+    const command = /^\$\((.*)\)$/s.exec(tag)?.[1];
+    if (command !== undefined) {
+      const result = await shell(command);
+      if (result.code !== 0) {
+        throw new Error(
+          `Step "${step.name}" push tag command failed with exit code ${result.code}: ${command}`,
+        );
+      }
+      tag = result.stdout.trim();
+      if (tag === "") {
+        throw new Error(
+          `Step "${step.name}" push tag command produced no output: ${command}`,
+        );
+      }
+    }
+    const target = `${push.image}:${tag}`;
+    log(`Pushing ${step.name} as ${target}`);
+    await docker.tagImage(imageTag(step, runId), target);
+    await docker.push(target, sinkFor(step.name), step.quiet);
+  };
+
   /** Stop a running service, draining its live log follower and recording when it ended. */
   const stopService = async (name: string): Promise<void> => {
     // Remove the container first so its log stream reaches EOF, then let the
@@ -381,7 +415,7 @@ export async function runPipeline(
     const record = records.get(step.name)!;
     record.startedAt = Date.now();
     try {
-      if (step.onlyIf !== undefined && (await shell(step.onlyIf)) !== 0) {
+      if (step.onlyIf !== undefined && (await shell(step.onlyIf)).code !== 0) {
         log(`Skipping ${step.name} (only-if check failed: ${step.onlyIf})`);
         record.status = "skipped";
         record.endedAt = Date.now();
@@ -435,6 +469,7 @@ export async function runPipeline(
             log(`Service ${step.name} is ready`);
           }
         });
+        await pushBuiltImage(step);
         // A service keeps running; it is stopped (and its end recorded) by
         // finish() / teardown once no longer needed.
         return;
@@ -452,6 +487,9 @@ export async function runPipeline(
           await runCommands(step, step.command);
         }
       });
+      // The push happens outside the timeout budget: that covers the step's
+      // execution, not the upload of its image.
+      await pushBuiltImage(step);
       record.endedAt = Date.now();
       await finish(step);
     } catch (err) {

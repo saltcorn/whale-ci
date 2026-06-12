@@ -91,6 +91,10 @@ export interface DockerClient {
   ): LogFollower;
   /** Commit a stopped container's filesystem to a new image tag. */
   commit(container: string, tag: string): Promise<void>;
+  /** Apply an additional tag to an existing image (`docker tag`). */
+  tagImage(source: string, target: string): Promise<void>;
+  /** Push an image reference to its registry. */
+  push(image: string, sink?: OutputSink, quiet?: boolean): Promise<void>;
   /** Remove an image by tag; never rejects. */
   removeImage(tag: string): Promise<void>;
   /** Stop and remove a container by name; never rejects. */
@@ -373,6 +377,18 @@ export class CliDockerClient implements DockerClient {
 
   async commit(container: string, tag: string): Promise<void> {
     await this.#exec(["commit", container, tag], { quiet: true });
+  }
+
+  async tagImage(source: string, target: string): Promise<void> {
+    await this.#exec(["tag", source, target], { quiet: true });
+  }
+
+  async push(
+    image: string,
+    sink?: OutputSink,
+    quiet?: boolean,
+  ): Promise<void> {
+    await this.#exec(["push", image], { sink, quiet });
   }
 
   async removeImage(tag: string): Promise<void> {
