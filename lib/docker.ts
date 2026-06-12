@@ -201,6 +201,49 @@ export function splitCommand(command: string | undefined): string[] | undefined 
   return parts.length > 0 ? parts : undefined;
 }
 
+/** Unquoted occurrences of any of these characters mean the command needs a shell. */
+const SHELL_META = new Set("|&;<>()$`*?[~");
+
+/**
+ * True when the command uses shell syntax — an unquoted, unescaped shell
+ * metacharacter (pipes, redirections, substitutions, globs, ...) — and so must
+ * run through `sh -c` rather than being exec'd from a plain argv split. `$`
+ * and backquote keep their shell meaning inside double quotes, matching how a
+ * real shell would treat them.
+ */
+export function needsShell(command: string): boolean {
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = undefined;
+    } else if (quote === '"') {
+      if (ch === '"') quote = undefined;
+      else if (ch === "\\") i++;
+      else if (ch === "$" || ch === "`") return true;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (ch === "\\") {
+      i++;
+    } else if (SHELL_META.has(ch)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Turn a `command:` string into the argv to run in the container: a plain
+ * command is split into words (so any image entrypoint applies as usual),
+ * while a command using shell syntax is handed to `sh -c` verbatim so pipes,
+ * redirections, `$VAR` expansions and globs work without explicit wrapping.
+ */
+export function commandArgv(command: string | undefined): string[] | undefined {
+  if (command === undefined) return undefined;
+  if (needsShell(command)) return ["sh", "-c", command];
+  return splitCommand(command);
+}
+
 /** Build the argv for `docker build`. */
 export function buildArgs(
   tag: string,

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildArgs,
+  commandArgv,
   firstFromImage,
   imageTag,
+  needsShell,
   rewriteBaseImage,
   type RunOptions,
   runArgs,
@@ -96,6 +98,38 @@ test("splitCommand honours shell-style quoting", () => {
   assert.deepEqual(splitCommand(`a\\ b`), ["a b"]);
   assert.deepEqual(splitCommand(`""`), [""]);
   assert.throws(() => splitCommand(`echo "unterminated`), /Unterminated double quote/);
+});
+
+test("needsShell spots unquoted shell metacharacters", () => {
+  assert.equal(needsShell("wget -qO - https://x.org/setup | bash -"), true);
+  assert.equal(needsShell("apt update && apt install -y wget"), true);
+  assert.equal(needsShell("echo done > /tmp/marker"), true);
+  assert.equal(needsShell("rm -f *.tmp"), true);
+  assert.equal(needsShell("echo $HOME"), true);
+  assert.equal(needsShell("apt install -qqy wget"), false);
+  assert.equal(needsShell("npm test"), false);
+});
+
+test("needsShell follows shell quoting rules", () => {
+  // Quoted metacharacters are literal arguments, not shell syntax.
+  assert.equal(needsShell(`grep "a|b" file`), false);
+  assert.equal(needsShell(`echo 'a && b'`), false);
+  assert.equal(needsShell(`echo \\| pipe`), false);
+  // $ and backquote keep their meaning inside double quotes.
+  assert.equal(needsShell(`echo "$HOME"`), true);
+  assert.equal(needsShell("echo \"`date`\""), true);
+  assert.equal(needsShell(`echo '$HOME'`), false);
+});
+
+test("commandArgv splits plain commands and shells out the rest", () => {
+  assert.deepEqual(commandArgv("npm test"), ["npm", "test"]);
+  assert.deepEqual(commandArgv("wget -qO - https://x.org/s | bash -"), [
+    "sh",
+    "-c",
+    "wget -qO - https://x.org/s | bash -",
+  ]);
+  assert.equal(commandArgv(undefined), undefined);
+  assert.equal(commandArgv("   "), undefined);
 });
 
 test("buildArgs constructs a docker build invocation", () => {

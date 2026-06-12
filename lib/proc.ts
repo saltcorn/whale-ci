@@ -62,9 +62,10 @@ export function execTool(
 ): Promise<number> {
   return new Promise((resolvePromise, reject) => {
     const streamMode = opts.sink ? "pipe" : opts.quiet ? "ignore" : "inherit";
-    // Pipe stdin only when there is input to write; otherwise leave it as the
-    // shared stream mode.
-    const stdin = opts.input !== undefined ? "pipe" : streamMode;
+    // Pipe stdin only when there is input to write; otherwise close it. Some
+    // tools read stdin to EOF when it is not a terminal (e.g. `incus launch`
+    // accepts instance config on stdin), so an open pipe would hang them.
+    const stdin = opts.input !== undefined ? "pipe" : "ignore";
     const child = spawn(binary, args, {
       stdio: [stdin, streamMode, streamMode],
     });

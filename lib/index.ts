@@ -7,8 +7,10 @@ export {
 export {
   buildArgs,
   CliDockerClient,
+  commandArgv,
   firstFromImage,
   imageTag,
+  needsShell,
   rewriteBaseImage,
   runArgs,
   splitCommand,

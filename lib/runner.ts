@@ -1,11 +1,11 @@
 import {
   CliDockerClient,
+  commandArgv,
   type DockerClient,
   imageTag,
   type LogFollower,
   type OutputSink,
   type RunOptions,
-  splitCommand,
 } from "./docker.ts";
 import { CliIncusClient, type IncusClient, instanceName } from "./incus.ts";
 import { runShell, type ShellResult } from "./proc.ts";
@@ -187,7 +187,7 @@ export async function runPipeline(
       try {
         log(`Running ${step.name}: ${commands[0]}`);
         const code = await docker.run(
-          optionsFor(step, splitCommand(commands[0])),
+          optionsFor(step, commandArgv(commands[0])),
           sink,
           step.quiet,
         );
@@ -210,7 +210,7 @@ export async function runPipeline(
         try {
           log(`Running ${step.name}: ${commands[i]}`);
           const code = await docker.run(
-            optionsFor(step, splitCommand(commands[i]), {
+            optionsFor(step, commandArgv(commands[i]), {
               image,
               name: container,
               keep: true,
@@ -260,7 +260,7 @@ export async function runPipeline(
       );
       for (const command of step.command ?? []) {
         log(`Running ${step.name}: ${command}`);
-        const argv = splitCommand(command);
+        const argv = commandArgv(command);
         if (argv === undefined) continue;
         const code = await incus.exec(
           name,
@@ -456,7 +456,7 @@ export async function runPipeline(
           log(`Starting service ${step.name}`);
           started.add(step.name);
           // A service has at most one command (enforced at parse time).
-          const argv = step.command ? splitCommand(step.command[0]) : undefined;
+          const argv = step.command ? commandArgv(step.command[0]) : undefined;
           await docker.startDetached(
             optionsFor(step, argv),
             sinkFor(step.name),

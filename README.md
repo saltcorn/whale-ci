@@ -73,6 +73,16 @@ The valid keys in each section are:
   entrypoint just like a single command would, and the container's filesystem is
   committed between commands so changes from one carry forward to the next. A
   service step may have at most one command.
+
+  A plain command is split into words (honouring quotes) and run directly,
+  without a shell. A command containing unquoted shell syntax — pipes,
+  `&&`/`;`, redirections, `$VAR` or `$(...)` substitutions, backquotes, globs
+  (`*`, `?`, `[`), or `~` — is instead run as `sh -c "<command>"` inside the
+  container, so something like
+  `wget -qO - https://deb.nodesource.com/setup_24.x | bash -` works as
+  written. Quoting a metacharacter (`grep "a|b" file`) keeps it a literal
+  argument, except that `$` and backquotes keep their shell meaning inside
+  double quotes, just as in a real shell.
 * environment: environment variables for the container, given either as a
   mapping (`KEY: value`) or a list of `KEY=value` strings.
 * disable: `true` or `false` (default `false`). When `true` the step is
