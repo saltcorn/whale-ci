@@ -67,6 +67,12 @@ export interface Step {
    */
   readyOn?: string;
   /**
+   * A bash command evaluated on the host just before the step runs. If it
+   * exits non-zero the step is skipped (it still counts as completed, so its
+   * dependents run as usual). Undefined means the step always runs.
+   */
+  onlyIf?: string;
+  /**
    * Extra time to wait, in seconds, after all dependencies are ready and before
    * the step runs. Undefined means no extra delay.
    */

@@ -407,6 +407,94 @@ job:
   assert.equal(steps.find((s) => s.name === "orphan")!.status, "skipped");
 });
 
+test("only-if skips the step when the check exits non-zero", async () => {
+  const config = parseConfig(
+    "job:\n  image: alpine\n  command: go\n  only-if: test -f go.mod",
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const checks: string[] = [];
+  const shell = async (command: string) => {
+    checks.push(command);
+    return 1;
+  };
+  const { ok, steps } = await runPipeline(config, { docker, ...base, shell });
+
+  assert.equal(ok, true);
+  assert.deepEqual(checks, ["test -f go.mod"]);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "skipped");
+  // The skipped step is neither pulled nor run.
+  assert.deepEqual(docker.kinds("pull"), []);
+  assert.deepEqual(docker.kinds("run"), []);
+});
+
+test("only-if runs the step when the check exits zero", async () => {
+  const config = parseConfig(
+    "job:\n  image: alpine\n  command: go\n  only-if: test -f go.mod",
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const { ok, steps } = await runPipeline(config, {
+    docker,
+    ...base,
+    shell: async () => 0,
+  });
+
+  assert.equal(ok, true);
+  assert.equal(steps.find((s) => s.name === "job")!.status, "success");
+  assert.deepEqual(docker.kinds("run"), ["job"]);
+});
+
+test("steps without only-if never invoke the shell", async () => {
+  const docker = new FakeDocker();
+  const checks: string[] = [];
+  await runPipeline(load(), {
+    docker,
+    ...base,
+    shell: async (command) => {
+      checks.push(command);
+      return 0;
+    },
+  });
+  assert.deepEqual(checks, []);
+});
+
+test("dependents of an only-if-skipped step still run, and its services are released", async () => {
+  const config = parseConfig(
+    `
+db:
+  image: postgres
+  service: true
+migrate:
+  image: alpine
+  command: migrate
+  only-if: "false"
+  depends: db
+test:
+  image: alpine
+  command: runtests
+  depends: migrate
+`,
+    "/work",
+  );
+  const docker = new FakeDocker();
+  // Only the migrate step's check fails; it is the only step with only-if.
+  const { ok, steps } = await runPipeline(config, {
+    docker,
+    ...base,
+    shell: async () => 1,
+  });
+
+  assert.equal(ok, true);
+  assert.equal(steps.find((s) => s.name === "migrate")!.status, "skipped");
+  assert.equal(steps.find((s) => s.name === "test")!.status, "success");
+  // The dependent ran even though its prerequisite was skipped.
+  assert.deepEqual(docker.kinds("run"), ["test"]);
+  // The service the skipped step depended on is stopped, not left running.
+  assert.ok(docker.at("stop:net-db") !== -1, "service db is stopped");
+  assert.ok(docker.at("stop:net-db") < docker.at("removeNetwork:net"));
+});
+
 test("a step that exceeds its timeout-minutes fails and is torn down", async () => {
   const config = parseConfig(
     "job:\n  image: alpine\n  command: go\n  timeout-minutes: 2",

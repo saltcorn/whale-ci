@@ -8,6 +8,7 @@ import {
   splitCommand,
 } from "./docker.ts";
 import { CliIncusClient, type IncusClient, instanceName } from "./incus.ts";
+import { execTool } from "./proc.ts";
 import type { StepReport, StepStatus } from "./report.ts";
 import { runScheduled } from "./schedule.ts";
 import type { Config, Step } from "./types.ts";
@@ -28,6 +29,12 @@ export interface RunnerOptions {
   captureOutput?: boolean;
   /** Sleep for a number of milliseconds; defaults to a real timer. Injectable for tests. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Run a shell command on the host and resolve with its exit code; used to
+   * evaluate each step's `only-if` condition. Defaults to `bash -c` with the
+   * command's output discarded. Injectable for tests.
+   */
+  shell?: (command: string) => Promise<number>;
   /**
    * Schedule `fire` to run after `ms` milliseconds, returning a canceller that
    * prevents it from firing. Used to enforce per-step timeouts; defaults to
@@ -95,6 +102,9 @@ export async function runPipeline(
   const capture = options.captureOutput ?? false;
   const sleep = options.sleep ??
     ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const shell = options.shell ??
+    ((command: string) =>
+      execTool("bash", ["-c", command], { allowNonZero: true, quiet: true }));
   const timer = options.timer ??
     ((ms: number, fire: () => void) => {
       const handle = setTimeout(fire, ms);
@@ -371,6 +381,16 @@ export async function runPipeline(
     const record = records.get(step.name)!;
     record.startedAt = Date.now();
     try {
+      if (step.onlyIf !== undefined && (await shell(step.onlyIf)) !== 0) {
+        log(`Skipping ${step.name} (only-if check failed: ${step.onlyIf})`);
+        record.status = "skipped";
+        record.endedAt = Date.now();
+        // The skipped step still counts as completed: its dependents run, and
+        // the services it depended on are released.
+        await finish(step);
+        return;
+      }
+
       if (
         step.service && (dependents.get(step.name)?.size ?? 0) === 0
       ) {

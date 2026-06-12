@@ -428,6 +428,23 @@ test("ready-on must be a string", () => {
   );
 });
 
+test("only-if is parsed as a string and defaults to undefined", () => {
+  const withCheck = parseConfig(
+    "a:\n  image: x\n  only-if: test -f go.mod",
+    "/w",
+  ).steps.get("a")!;
+  assert.equal(withCheck.onlyIf, "test -f go.mod");
+  const without = parseConfig("a:\n  image: x", "/w").steps.get("a")!;
+  assert.equal(without.onlyIf, undefined);
+});
+
+test("only-if must be a string", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  only-if: 5", "/w"),
+    /key "only-if" must be a string/,
+  );
+});
+
 test("delay is parsed as a number of seconds and defaults to undefined", () => {
   const withDelay = parseConfig("a:\n  image: x\n  delay: 5", "/w").steps.get("a")!;
   assert.equal(withDelay.delay, 5);

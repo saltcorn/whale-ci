@@ -78,6 +78,12 @@ The valid keys in each section are:
 * disable: `true` or `false` (default `false`). When `true` the step is
   completely ignored: it is dropped from the pipeline and is never built, run,
   reported, or available as a dependency of other steps.
+* only-if: a string. Evaluated as a bash command on the host just before the
+  step would run (after its dependencies are ready). If the command exits
+  non-zero the step is skipped: it is not built or run, and it is reported as
+  skipped. A skipped step still counts as completed, so steps that depend on
+  it run as usual — note that dependents of a skipped *service* will not find
+  it running. The command's output is discarded.
 * ready-on: a string (only valid on a service). Any step that depends on this
   service is held until this exact string appears in the service's output, so
   you can wait for a slow-starting service to finish booting (for example a
