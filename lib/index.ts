@@ -27,8 +27,10 @@ export {
   proxyDeviceArgs,
 } from "./incus.ts";
 export type { IncusClient, IncusLaunchOptions } from "./incus.ts";
-export { formatDuration, renderReport } from "./report.ts";
+export { formatDuration, renderDashboard, renderReport } from "./report.ts";
 export type { ReportMeta, StepReport, StepStatus } from "./report.ts";
+export { dataDir, defaultDatabasePath, RunStore } from "./history.ts";
+export type { RunHistory, RunRecord, RunStatus } from "./history.ts";
 export { prerequisites, runScheduled } from "./schedule.ts";
 export { dependentsOf, runPipeline } from "./runner.ts";
 export type { PipelineResult, RunnerOptions } from "./runner.ts";
@@ -52,7 +54,7 @@ export {
   serverConfigFromEnv,
   verifyCheckout,
 } from "./server.ts";
-export type { CiServerOptions, RunJob, ServerEnv } from "./server.ts";
+export type { CiServerOptions, JobResult, RunJob, ServerEnv } from "./server.ts";
 export { runShell, type ShellResult } from "./proc.ts";
 export {
   type Config,

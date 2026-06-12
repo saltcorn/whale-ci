@@ -200,9 +200,18 @@ At the end, whether the test succeeded or not, all running containers are stoppe
 With `--serve`, whale-ci runs as a long-lived HTTP server that GitHub can call as
 a [push webhook](https://docs.github.com/webhooks). The webhook is served on
 the `/webhook` path (configure GitHub's payload URL as
-`http://<host>:<port>/webhook`); requests to any other path get a `404`. Each
-accepted push is built and tested, and the result is reported back to GitHub as
-a commit status (so it shows up as a check on the commit and pull request).
+`http://<host>:<port>/webhook`). Each accepted push is built and tested, and
+the result is reported back to GitHub as a commit status (so it shows up as a
+check on the commit and pull request).
+
+The server also serves a small dashboard:
+
+* `/` lists the recent runs from the [run history](#run-history), newest
+  first — still-running ones included — showing each run's branch, start date
+  and outcome (pass/fail), with a link to its HTML report.
+* `/runs/<id>` serves the stored HTML report of a finished run.
+
+Requests to any other path get a `404`.
 
 The command must be run **from the root of a git checkout** that contains the
 named config file; it refuses to start otherwise. Because several pushes (to
@@ -240,3 +249,22 @@ npx whale-ci --serve ci.yml
 `ping` events are answered, non-`push` events are ignored, and branch deletions
 and tag pushes are skipped. Press Ctrl-C to stop the server; it waits for any
 in-flight CI jobs to finish before exiting.
+
+# Run history
+
+Every run — one-shot CLI runs and webhook-triggered server runs alike — is
+recorded in an SQLite database (using Node's built-in `node:sqlite`). A run is
+inserted as `running` when it starts and updated with its outcome (`success`,
+`failure` or `error`) and its self-contained HTML report when it finishes. The
+server's dashboard at `/` is rendered from this database.
+
+The database lives at `runs.db` in the customary per-user application data
+directory:
+
+* Linux: `$XDG_DATA_HOME/whale-ci/runs.db`, defaulting to
+  `~/.local/share/whale-ci/runs.db`
+* macOS: `~/Library/Application Support/whale-ci/runs.db`
+
+One-shot runs are tagged with the current git branch and commit when run from
+inside a git checkout; server runs are tagged with the pushed branch and
+commit.

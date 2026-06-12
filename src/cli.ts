@@ -17,6 +17,8 @@ import {
 import { loadConfig } from "../lib/config.ts";
 import { CliGitClient } from "../lib/git.ts";
 import { GitHubStatusReporter } from "../lib/github.ts";
+import { RunStore } from "../lib/history.ts";
+import { runShell } from "../lib/proc.ts";
 import { renderReport } from "../lib/report.ts";
 import { runPipeline } from "../lib/runner.ts";
 import { CiServer, serverConfigFromEnv, verifyCheckout } from "../lib/server.ts";
@@ -111,22 +113,32 @@ async function runCli(
     };
     process.on("SIGINT", onSigint);
 
+    // Every run is recorded in the shared run history, tagged with the
+    // branch/commit when run from a git checkout. Output is always captured so
+    // the stored record carries the full HTML report.
+    const store = new RunStore();
+    const runId = store.start(await gitContext());
+
     let result;
     try {
       result = await runPipeline(config, {
-        captureOutput: output !== undefined,
+        captureOutput: true,
         signal: controller.signal,
         maxConcurrency,
       });
+    } catch (err) {
+      store.finish(runId, "error");
+      store.close();
+      throw err;
     } finally {
       process.removeListener("SIGINT", onSigint);
     }
 
+    const html = renderReport(result.steps, { ok: result.ok, configFile });
+    store.finish(runId, result.ok ? "success" : "failure", html);
+    store.close();
+
     if (output !== undefined) {
-      const html = renderReport(result.steps, {
-        ok: result.ok,
-        configFile,
-      });
       await writeFile(output, html, "utf8");
       console.error(`Report written to ${output}`);
     }
@@ -144,6 +156,23 @@ async function runCli(
 }
 
 /**
+ * The branch and commit of the current working directory's git checkout, for
+ * tagging a one-shot run in the run history. Both are best effort: outside a
+ * checkout (or on a detached HEAD, for the branch) they are left undefined.
+ */
+async function gitContext(): Promise<{ branch?: string; commit?: string }> {
+  const value = async (command: string): Promise<string | undefined> => {
+    const { code, stdout } = await runShell(command);
+    const text = stdout.trim();
+    return code === 0 && text !== "" ? text : undefined;
+  };
+  return {
+    branch: await value("git branch --show-current"),
+    commit: await value("git rev-parse HEAD"),
+  };
+}
+
+/**
  * Run as a GitHub webhook CI server. Validates that the current directory is the
  * root of a git checkout containing `configFile`, reads its settings from the
  * environment, and serves until interrupted (Ctrl-C), draining in-flight CI jobs
@@ -158,6 +187,7 @@ async function runServe(configFile: string): Promise<number> {
     // The worktree root must exist before git can add worktrees under it.
     await mkdir(env.worktreeRoot, { recursive: true });
 
+    const store = new RunStore();
     const server = new CiServer({
       repoRoot,
       configFile,
@@ -165,12 +195,14 @@ async function runServe(configFile: string): Promise<number> {
       worktreeRoot: env.worktreeRoot,
       git,
       status: new GitHubStatusReporter(env.githubToken),
+      store,
     });
 
     await server.listen(env.listenPort);
     console.error(
       `whale-ci serving webhooks on port ${env.listenPort} ` +
-        `(checkout ${repoRoot}, worktrees under ${env.worktreeRoot})`,
+        `(dashboard at http://localhost:${env.listenPort}/, ` +
+        `checkout ${repoRoot}, worktrees under ${env.worktreeRoot})`,
     );
 
     // Run until Ctrl-C, then stop listening and let running jobs finish.
@@ -182,6 +214,7 @@ async function runServe(configFile: string): Promise<number> {
       };
       process.on("SIGINT", onSigint);
     });
+    store.close();
     return 0;
   } catch (err) {
     if (err instanceof ConfigError) {

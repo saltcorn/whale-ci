@@ -4,9 +4,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CiServer, serverConfigFromEnv, verifyCheckout } from "../lib/server.ts";
+import { CiServer, type JobResult, serverConfigFromEnv, verifyCheckout } from "../lib/server.ts";
 import type { CommitState, StatusReporter } from "../lib/github.ts";
 import type { GitClient } from "../lib/git.ts";
+import { RunStore } from "../lib/history.ts";
 import { ConfigError } from "../lib/types.ts";
 
 const SECRET = "topsecret";
@@ -74,15 +75,17 @@ interface Harness {
   server: CiServer;
   git: FakeGit;
   status: FakeStatus;
+  store: RunStore;
   runDirs: string[];
 }
 
 /** Start a CiServer on an ephemeral port with the given run outcome. */
 async function startServer(
-  run: (dir: string) => Promise<boolean>,
+  run: (dir: string) => Promise<JobResult>,
   git = new FakeGit("/repo"),
 ): Promise<Harness> {
   const status = new FakeStatus();
+  const store = new RunStore(":memory:");
   const runDirs: string[] = [];
   const server = new CiServer({
     repoRoot: "/repo",
@@ -91,6 +94,7 @@ async function startServer(
     worktreeRoot: "/tmp/dockci-worktrees",
     git,
     status,
+    store,
     run: (dir) => {
       runDirs.push(dir);
       return run(dir);
@@ -98,7 +102,12 @@ async function startServer(
     log: () => {},
   });
   await server.listen(0);
-  return { server, git, status, runDirs };
+  return { server, git, status, store, runDirs };
+}
+
+/** A run stub that always finishes with `ok` and a small fixed report. */
+function fixedRun(ok: boolean): (dir: string) => Promise<JobResult> {
+  return async () => ({ ok, report: `<html>report ${ok}</html>` });
 }
 
 /** POST a webhook to the running server with a (correct by default) signature. */
@@ -186,8 +195,8 @@ test("verifyCheckout requires a git checkout rooted at cwd with the config", asy
   assert.equal(await verifyCheckout(new FakeGit(dir), dir, "ci.yml"), dir);
 });
 
-test("a non-POST request is rejected", async () => {
-  const { server } = await startServer(async () => true);
+test("a non-POST request to the webhook is rejected", async () => {
+  const { server } = await startServer(fixedRun(true));
   try {
     const res = await fetch(`http://127.0.0.1:${server.port}/webhook`);
     assert.equal(res.status, 405);
@@ -196,15 +205,17 @@ test("a non-POST request is rejected", async () => {
   }
 });
 
-test("a request outside /webhook is not found", async () => {
-  const { server, git } = await startServer(async () => true);
+test("an unknown path is not found and a POST to a page is not allowed", async () => {
+  const { server, git } = await startServer(fixedRun(true));
   try {
-    for (const path of ["/", "/other"]) {
-      const res = await fetch(`http://127.0.0.1:${server.port}${path}`, {
-        method: "POST",
-      });
-      assert.equal(res.status, 404);
-    }
+    const notFound = await fetch(`http://127.0.0.1:${server.port}/other`, {
+      method: "POST",
+    });
+    assert.equal(notFound.status, 404);
+    const wrongMethod = await fetch(`http://127.0.0.1:${server.port}/`, {
+      method: "POST",
+    });
+    assert.equal(wrongMethod.status, 405);
     // A query string does not change the route.
     const res = await fetch(
       `http://127.0.0.1:${server.port}/webhook?x=1`,
@@ -218,7 +229,7 @@ test("a request outside /webhook is not found", async () => {
 });
 
 test("a ping is answered without starting a job", async () => {
-  const { server, git } = await startServer(async () => true);
+  const { server, git } = await startServer(fixedRun(true));
   try {
     const res = await postWebhook(server, "ping", { zen: "hi" });
     assert.equal(res.status, 200);
@@ -230,7 +241,7 @@ test("a ping is answered without starting a job", async () => {
 });
 
 test("an invalid signature is rejected and starts no job", async () => {
-  const { server, git, status } = await startServer(async () => true);
+  const { server, git, status } = await startServer(fixedRun(true));
   try {
     const res = await postWebhook(server, "push", PUSH, { signature: "sha256=bad" });
     assert.equal(res.status, 401);
@@ -243,7 +254,7 @@ test("an invalid signature is rejected and starts no job", async () => {
 });
 
 test("a successful push runs CI in a worktree and reports success", async () => {
-  const { server, git, status, runDirs } = await startServer(async () => true);
+  const { server, git, status, runDirs } = await startServer(fixedRun(true));
   try {
     const res = await postWebhook(server, "push", PUSH);
     assert.equal(res.status, 202);
@@ -264,7 +275,7 @@ test("a successful push runs CI in a worktree and reports success", async () => 
 });
 
 test("a failing pipeline reports failure but still cleans up", async () => {
-  const { server, git, status } = await startServer(async () => false);
+  const { server, git, status } = await startServer(fixedRun(false));
   try {
     await postWebhook(server, "push", PUSH);
     await server.drain();
@@ -278,7 +289,7 @@ test("a failing pipeline reports failure but still cleans up", async () => {
 test("a git/pipeline error reports error and skips a never-made worktree", async () => {
   const git = new FakeGit("/repo");
   git.fetchError = new Error("network down");
-  const { server, status } = await startServer(async () => true, git);
+  const { server, status } = await startServer(fixedRun(true), git);
   try {
     await postWebhook(server, "push", PUSH);
     await server.drain();
@@ -296,7 +307,7 @@ test("concurrent pushes get distinct worktrees", async () => {
   const gate = new Promise<void>((r) => (release = r));
   const { server, runDirs } = await startServer(async () => {
     await gate;
-    return true;
+    return { ok: true };
   });
   try {
     await postWebhook(server, "push", PUSH);
@@ -325,7 +336,7 @@ test("git operations on the shared checkout never overlap across concurrent push
   const gate = new Promise<void>((r) => (release = r));
   const { server } = await startServer(async () => {
     await gate;
-    return true;
+    return { ok: true };
   }, git);
   try {
     await postWebhook(server, "push", PUSH);
@@ -349,12 +360,102 @@ test("git operations on the shared checkout never overlap across concurrent push
 });
 
 test("an unhandled event type is ignored", async () => {
-  const { server, git } = await startServer(async () => true);
+  const { server, git } = await startServer(fixedRun(true));
   try {
     const res = await postWebhook(server, "issues", { action: "opened" });
     assert.equal(res.status, 204);
     await server.drain();
     assert.deepEqual(git.calls, []);
+  } finally {
+    await server.close();
+  }
+});
+
+test("the dashboard lists recent runs with branch, date and outcome", async () => {
+  const { server } = await startServer(fixedRun(true));
+  try {
+    await postWebhook(server, "push", PUSH);
+    await server.drain();
+    await postWebhook(server, "push", {
+      ...PUSH,
+      ref: "refs/heads/other",
+      after: "f00df00df00d",
+    });
+    await server.drain();
+
+    const res = await fetch(`http://127.0.0.1:${server.port}/`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    const html = await res.text();
+    assert.match(html, /feature\/x/);
+    assert.match(html, /other/);
+    assert.match(html, /passed/);
+    // Each finished run links to its stored report.
+    assert.match(html, /href="\/runs\/1"/);
+    assert.match(html, /href="\/runs\/2"/);
+    // A date is shown for the runs (today, in the dashboard's UTC format).
+    assert.match(html, /\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("the dashboard shows a job that is still running, without a report link", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const { server } = await startServer(async () => {
+    await gate;
+    return { ok: false, report: "<html>failed run</html>" };
+  });
+  try {
+    await postWebhook(server, "push", PUSH);
+    // Let the job reach the blocked run() so it is recorded as running.
+    await new Promise((r) => setTimeout(r, 50));
+
+    let html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text();
+    assert.match(html, /running/);
+    assert.doesNotMatch(html, /href="\/runs\//);
+
+    release();
+    await server.drain();
+    html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text();
+    assert.match(html, /failed/);
+    assert.match(html, /href="\/runs\/1"/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a finished run's report is served and an unknown run is 404", async () => {
+  const { server } = await startServer(fixedRun(true));
+  try {
+    await postWebhook(server, "push", PUSH);
+    await server.drain();
+
+    const res = await fetch(`http://127.0.0.1:${server.port}/runs/1`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    assert.equal(await res.text(), "<html>report true</html>");
+
+    const missing = await fetch(`http://127.0.0.1:${server.port}/runs/99`);
+    assert.equal(missing.status, 404);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a job that errors is recorded as an error in the run history", async () => {
+  const git = new FakeGit("/repo");
+  git.fetchError = new Error("network down");
+  const { server, store } = await startServer(fixedRun(true), git);
+  try {
+    await postWebhook(server, "push", PUSH);
+    await server.drain();
+    const runs = store.recent();
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0]!.status, "error");
+    assert.equal(runs[0]!.branch, "feature/x");
+    assert.equal(runs[0]!.hasReport, false);
   } finally {
     await server.close();
   }

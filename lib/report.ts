@@ -1,3 +1,5 @@
+import type { RunRecord, RunStatus } from "./history.ts";
+
 /** Outcome of a single step in a pipeline run. */
 export type StepStatus = "success" | "failure" | "skipped";
 
@@ -77,6 +79,86 @@ function renderStep(step: StepReport): string {
     </summary>
     <pre>${output}</pre>
   </details>`;
+}
+
+const RUN_STATUS_LABEL: Record<RunStatus, string> = {
+  running: "running",
+  success: "passed",
+  failure: "failed",
+  error: "error",
+};
+
+/** CSS badge class for a run's status, reusing the step badge palette. */
+const RUN_STATUS_CLASS: Record<RunStatus, string> = {
+  running: "running",
+  success: "success",
+  failure: "failure",
+  error: "failure",
+};
+
+/**
+ * Render the server's front page: a table of recent runs (running ones
+ * included), newest first, each showing its branch, start date and outcome and
+ * linking to the stored HTML report when one exists.
+ */
+export function renderDashboard(runs: RunRecord[]): string {
+  const rows = runs.map(renderRunRow).join("\n");
+  const body = runs.length === 0
+    ? `<p class="empty">No runs recorded yet.</p>`
+    : `<table>
+  <thead><tr><th>Status</th><th>Branch</th><th>Date</th><th>Duration</th><th>Report</th></tr></thead>
+  <tbody>
+${rows}
+  </tbody>
+</table>`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>whale-ci — recent runs</title>
+<style>${STYLE}${DASHBOARD_STYLE}</style>
+</head>
+<body>
+<header class="ok">
+  <h1>whale-ci — recent runs</h1>
+</header>
+<main>
+${body}
+</main>
+</body>
+</html>
+`;
+}
+
+function renderRunRow(run: RunRecord): string {
+  const branch = run.branch !== undefined
+    ? escapeHtml(run.branch)
+    : `<span class="muted">—</span>`;
+  const commit = run.commit !== undefined
+    ? ` <span class="muted">${escapeHtml(run.commit.slice(0, 12))}</span>`
+    : "";
+  const duration = run.finishedAt !== undefined
+    ? formatDuration(run.finishedAt.getTime() - run.startedAt.getTime())
+    : "…";
+  const report = run.hasReport
+    ? `<a href="/runs/${run.id}">report</a>`
+    : `<span class="muted">—</span>`;
+  return `    <tr>
+      <td><span class="badge ${RUN_STATUS_CLASS[run.status]}">${
+    RUN_STATUS_LABEL[run.status]
+  }</span></td>
+      <td>${branch}${commit}</td>
+      <td>${escapeHtml(formatDate(run.startedAt))}</td>
+      <td>${duration}</td>
+      <td>${report}</td>
+    </tr>`;
+}
+
+/** Compact UTC timestamp for the dashboard, e.g. `2026-06-12 09:31 UTC`. */
+function formatDate(date: Date): string {
+  return date.toISOString().slice(0, 16).replace("T", " ") + " UTC";
 }
 
 /** Human-readable duration, e.g. `840 ms`, `2.4 s`, `1 m 05 s`. */
@@ -194,4 +276,15 @@ pre {
   word-break: break-word;
   overflow-x: auto;
 }
+`;
+
+const DASHBOARD_STYLE = `
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: .55rem .75rem; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+td { font-variant-numeric: tabular-nums; }
+a { color: #58a6ff; }
+.muted { color: var(--muted); }
+.empty { color: var(--muted); }
+.badge.running { background: #1f6feb; }
 `;

@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { loadConfig } from "./config.ts";
 import { type GitClient, slugifyBranch } from "./git.ts";
 import { parsePushEvent, type PushEvent, type StatusReporter, verifySignature } from "./github.ts";
+import type { RunHistory } from "./history.ts";
+import { renderDashboard, renderReport } from "./report.ts";
 import { runPipeline } from "./runner.ts";
 import { ConfigError } from "./types.ts";
 
@@ -80,8 +82,15 @@ export async function verifyCheckout(
   return root;
 }
 
+/** Outcome of one CI job: whether it passed, plus its HTML report. */
+export interface JobResult {
+  ok: boolean;
+  /** Self-contained HTML report of the run, stored in the run history. */
+  report?: string;
+}
+
 /** How a checked-out worktree is built and run; injectable for tests. */
-export type RunJob = (worktreeDir: string) => Promise<boolean>;
+export type RunJob = (worktreeDir: string) => Promise<JobResult>;
 
 export interface CiServerOptions {
   /** Root of the git checkout to create worktrees from. */
@@ -96,9 +105,12 @@ export interface CiServerOptions {
   git: GitClient;
   /** Reporter for posting commit statuses back to GitHub. */
   status: StatusReporter;
+  /** Run history every job is recorded in, served on the dashboard at `/`. */
+  store: RunHistory;
   /**
-   * Build and run the pipeline for a worktree, resolving true on success.
-   * Defaults to loading `configFile` from the worktree and running it.
+   * Build and run the pipeline for a worktree, resolving with the outcome and
+   * the HTML report. Defaults to loading `configFile` from the worktree and
+   * running it with output capture, rendering the standard report.
    */
   run?: RunJob;
   /** Sink for progress messages; defaults to console.error. */
@@ -118,6 +130,7 @@ export class CiServer {
   readonly #worktreeRoot: string;
   readonly #git: GitClient;
   readonly #status: StatusReporter;
+  readonly #store: RunHistory;
   readonly #run: RunJob;
   readonly #log: (message: string) => void;
   readonly #server: Server;
@@ -139,11 +152,18 @@ export class CiServer {
     this.#worktreeRoot = options.worktreeRoot;
     this.#git = options.git;
     this.#status = options.status;
+    this.#store = options.store;
     this.#log = options.log ?? ((m) => console.error(m));
     this.#run = options.run ?? (async (dir) => {
       const config = await loadConfig(resolve(dir, this.#configFile));
-      const result = await runPipeline(config);
-      return result.ok;
+      const result = await runPipeline(config, { captureOutput: true });
+      return {
+        ok: result.ok,
+        report: renderReport(result.steps, {
+          ok: result.ok,
+          configFile: this.#configFile,
+        }),
+      };
     });
     this.#server = createServer((req, res) => {
       void this.#handle(req, res);
@@ -181,10 +201,26 @@ export class CiServer {
     await this.drain();
   }
 
-  /** Handle one webhook request: authenticate, then dispatch a push to CI. */
+  /**
+   * Route one request: the webhook on POST /webhook, the run dashboard on
+   * GET /, and stored run reports on GET /runs/<id>.
+   */
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // The webhook is the server's only endpoint, served on /webhook.
-    const path = (req.url ?? "/").split("?")[0];
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
+
+    if (path === "/") {
+      if (req.method !== "GET") return reply(res, 405, "Method Not Allowed");
+      return replyHtml(res, renderDashboard(this.#store.recent()));
+    }
+
+    const runId = path.match(/^\/runs\/(\d+)$/);
+    if (runId !== null) {
+      if (req.method !== "GET") return reply(res, 405, "Method Not Allowed");
+      const report = this.#store.report(Number(runId[1]));
+      if (report === undefined) return reply(res, 404, "No report for this run");
+      return replyHtml(res, report);
+    }
+
     if (path !== "/webhook") {
       return reply(res, 404, "Not Found");
     }
@@ -246,6 +282,7 @@ export class CiServer {
     );
     this.#log(`CI start: ${repo} ${branch}@${short} -> ${worktreeDir}`);
 
+    const runId = this.#store.start({ branch, commit: sha });
     await this.#report(repo, sha, "pending", `Running CI for ${branch}`);
 
     let created = false;
@@ -258,7 +295,8 @@ export class CiServer {
         created = true;
       });
 
-      const ok = await this.#run(worktreeDir);
+      const { ok, report } = await this.#run(worktreeDir);
+      this.#store.finish(runId, ok ? "success" : "failure", report);
       this.#log(`CI ${ok ? "passed" : "failed"}: ${repo} ${branch}@${short}`);
       await this.#report(
         repo,
@@ -268,6 +306,7 @@ export class CiServer {
       );
     } catch (err) {
       const message = (err as Error).message;
+      this.#store.finish(runId, "error");
       this.#log(`CI error: ${repo} ${branch}@${short}: ${message}`);
       await this.#report(repo, sha, "error", message);
     } finally {
@@ -329,4 +368,10 @@ function header(req: IncomingMessage, name: string): string | undefined {
 function reply(res: ServerResponse, code: number, text: string): void {
   res.writeHead(code, { "Content-Type": "text/plain" });
   res.end(text);
+}
+
+/** Send a 200 HTML response. */
+function replyHtml(res: ServerResponse, html: string): void {
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
 }
