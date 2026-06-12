@@ -23,7 +23,9 @@ export interface IncusLaunchOptions {
 export interface IncusClient {
   /**
    * Launch an ephemeral instance from an image (pulling the image first if
-   * needed) and publish its ports, resolving once it is running.
+   * needed) and publish its ports, resolving once it is running and its
+   * network is up (it has been assigned an IPv4 address — waited on for up to
+   * a minute, since DHCP/DNS configuration lags the instance start).
    */
   launch(
     options: IncusLaunchOptions,
@@ -77,6 +79,20 @@ export function proxyDeviceArgs(name: string, port: number): string[] {
   ];
 }
 
+/**
+ * Build the argv listing just an instance's IPv4 column, in CSV format. The
+ * name is anchored because `incus list` treats its filter as a pattern that
+ * would otherwise also match instances whose names share the prefix.
+ */
+export function listAddressArgs(name: string): string[] {
+  return ["list", `^${name}$`, "--format", "csv", "--columns", "4"];
+}
+
+/** True when `incus list` CSV output shows an assigned IPv4 address. */
+export function hasIpv4Address(output: string): boolean {
+  return /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(output);
+}
+
 /** Build the argv for `incus exec`. */
 export function execArgs(
   name: string,
@@ -110,6 +126,33 @@ export class CliIncusClient implements IncusClient {
         sink,
         quiet,
       });
+    }
+    await this.#waitForNetwork(options.name);
+  }
+
+  /**
+   * Wait for the instance's network to come up before the first command runs.
+   * `incus launch` returns as soon as the instance has started, which is
+   * before DHCP has assigned it an address or configured DNS — a command run
+   * immediately would find a half-configured network ("could not resolve
+   * host"). An assigned IPv4 address signals the DHCP exchange is done (the
+   * lease carries the DNS configuration with it). Gives up after a minute so
+   * an instance that never gets an address still runs its commands, which can
+   * then fail with their own, clearer error if they actually need the network.
+   */
+  async #waitForNetwork(name: string): Promise<void> {
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      let output = "";
+      await execTool(this.#incus, listAddressArgs(name), {
+        allowNonZero: true,
+        quiet: true,
+        sink: (chunk) => {
+          output += chunk;
+        },
+      });
+      if (hasIpv4Address(output)) return;
+      await new Promise((r) => setTimeout(r, 500));
     }
   }
 

@@ -25,8 +25,10 @@ export type {
 export {
   CliIncusClient,
   execArgs,
+  hasIpv4Address,
   instanceName,
   launchArgs,
+  listAddressArgs,
   proxyDeviceArgs,
 } from "./incus.ts";
 export type { IncusClient, IncusLaunchOptions } from "./incus.ts";

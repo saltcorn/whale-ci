@@ -54,7 +54,10 @@ The valid keys in each section are:
   launched from the step's `image` (an incus image reference such as
   `images:debian/12`), each command runs inside it with `incus exec` (the
   instance's filesystem persists between commands), and the instance is deleted
-  when the step finishes. An incus step must use `image` — incus cannot build
+  when the step finishes. After launching, whale-ci waits (up to a minute) for
+  the instance to be assigned an IPv4 address before running the first
+  command, so commands that reach for the network do not race the instance's
+  DHCP/DNS setup. An incus step must use `image` — incus cannot build
   a `dockerfile` — and its image always refers to an incus image, never to
   another step's built image. Incus steps cannot be services and cannot depend
   on services, because there is no shared network between incus and docker
