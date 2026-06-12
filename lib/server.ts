@@ -183,6 +183,11 @@ export class CiServer {
 
   /** Handle one webhook request: authenticate, then dispatch a push to CI. */
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // The webhook is the server's only endpoint, served on /webhook.
+    const path = (req.url ?? "/").split("?")[0];
+    if (path !== "/webhook") {
+      return reply(res, 404, "Not Found");
+    }
     if (req.method !== "POST") {
       return reply(res, 405, "Method Not Allowed");
     }

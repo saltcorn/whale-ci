@@ -198,9 +198,11 @@ At the end, whether the test succeeded or not, all running containers are stoppe
 # Server mode (GitHub webhook backend)
 
 With `--serve`, whale-ci runs as a long-lived HTTP server that GitHub can call as
-a [push webhook](https://docs.github.com/webhooks). Each accepted push is built
-and tested, and the result is reported back to GitHub as a commit status (so it
-shows up as a check on the commit and pull request).
+a [push webhook](https://docs.github.com/webhooks). The webhook is served on
+the `/webhook` path (configure GitHub's payload URL as
+`http://<host>:<port>/webhook`); requests to any other path get a `404`. Each
+accepted push is built and tested, and the result is reported back to GitHub as
+a commit status (so it shows up as a check on the commit and pull request).
 
 The command must be run **from the root of a git checkout** that contains the
 named config file; it refuses to start otherwise. Because several pushes (to

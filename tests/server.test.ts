@@ -112,7 +112,7 @@ async function postWebhook(
   const signature = opts.signature ??
     "sha256=" +
       createHmac("sha256", opts.secret ?? SECRET).update(body).digest("hex");
-  return await fetch(`http://127.0.0.1:${server.port}/`, {
+  return await fetch(`http://127.0.0.1:${server.port}/webhook`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -189,8 +189,29 @@ test("verifyCheckout requires a git checkout rooted at cwd with the config", asy
 test("a non-POST request is rejected", async () => {
   const { server } = await startServer(async () => true);
   try {
-    const res = await fetch(`http://127.0.0.1:${server.port}/`);
+    const res = await fetch(`http://127.0.0.1:${server.port}/webhook`);
     assert.equal(res.status, 405);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a request outside /webhook is not found", async () => {
+  const { server, git } = await startServer(async () => true);
+  try {
+    for (const path of ["/", "/other"]) {
+      const res = await fetch(`http://127.0.0.1:${server.port}${path}`, {
+        method: "POST",
+      });
+      assert.equal(res.status, 404);
+    }
+    // A query string does not change the route.
+    const res = await fetch(
+      `http://127.0.0.1:${server.port}/webhook?x=1`,
+    );
+    assert.equal(res.status, 405);
+    await server.drain();
+    assert.deepEqual(git.calls, []);
   } finally {
     await server.close();
   }
