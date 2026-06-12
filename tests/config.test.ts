@@ -457,9 +457,23 @@ a:
   const a = parseConfig(yaml, "/w").steps.get("a")!;
   assert.deepEqual(a.push, {
     image: "myorg/myapp",
-    tag: "$(git rev-parse --short HEAD)",
+    tag: ["$(git rev-parse --short HEAD)"],
     onlyIf: 'test "$BRANCH" = main',
   });
+});
+
+test("push tag accepts a list of strings", () => {
+  const yaml = `
+a:
+  dockerfile: ./Dockerfile
+  push:
+    image: myorg/myapp
+    tag:
+      - latest
+      - $(git rev-parse --short HEAD)
+`;
+  const a = parseConfig(yaml, "/w").steps.get("a")!;
+  assert.deepEqual(a.push!.tag, ["latest", "$(git rev-parse --short HEAD)"]);
 });
 
 test("push defaults to undefined, with optional tag and only-if", () => {
@@ -502,7 +516,15 @@ test("push rejects unknown subkeys and non-string values", () => {
         "a:\n  dockerfile: ./d\n  push:\n    image: x\n    tag: 5",
         "/w",
       ),
-    /key "push.tag" must be a string/,
+    /key "push.tag" must be a string or list of strings/,
+  );
+  assert.throws(
+    () =>
+      parseConfig(
+        "a:\n  dockerfile: ./d\n  push:\n    image: x\n    tag: [v1, 5]",
+        "/w",
+      ),
+    /key "push.tag" must contain only strings/,
   );
 });
 

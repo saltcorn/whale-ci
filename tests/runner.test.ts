@@ -560,6 +560,33 @@ test("a $(...) push tag is evaluated and its output becomes the tag", async () =
   assert.deepEqual(docker.kinds("push"), ["myorg/myapp:abc1234"]);
 });
 
+test("a list of push tags pushes the image once per tag, in order", async () => {
+  const config = parseConfig(
+    PUSH_CONFIG(
+      "    image: myorg/myapp\n    tag:\n      - latest\n      - v2\n      - $(git rev-parse --short HEAD)",
+    ),
+    "/work",
+  );
+  const docker = new FakeDocker();
+  const { ok } = await runPipeline(config, {
+    docker,
+    ...base,
+    shell: async () => ({ code: 0, stdout: "abc1234\n" }),
+  });
+
+  assert.equal(ok, true);
+  assert.deepEqual(docker.kinds("tagImage"), [
+    "dockerci/job:net->myorg/myapp:latest",
+    "dockerci/job:net->myorg/myapp:v2",
+    "dockerci/job:net->myorg/myapp:abc1234",
+  ]);
+  assert.deepEqual(docker.kinds("push"), [
+    "myorg/myapp:latest",
+    "myorg/myapp:v2",
+    "myorg/myapp:abc1234",
+  ]);
+});
+
 test("a failing $(...) push tag command fails the step", async () => {
   const config = parseConfig(
     PUSH_CONFIG("    image: myorg/myapp\n    tag: $(false)"),

@@ -89,7 +89,8 @@ The valid keys in each section are:
   host's docker credentials, so `docker login` must already have been run.
   Subkeys:
   * image: the repository to push to, e.g. `myorg/myapp`. Required.
-  * tag: the tag to push as; defaults to `latest`. A value of the form
+  * tag: the tag (or list of tags) to push as; defaults to `latest`. A list
+    pushes the image once per tag, in order. Each value of the form
     `$(command)` is evaluated as a shell command on the host and its trimmed
     output becomes the tag (for example `tag: $(git rev-parse --short HEAD)`).
     If the command fails or prints nothing, the step fails.
@@ -103,7 +104,9 @@ The valid keys in each section are:
       command: make test
       push:
           image: myorg/myapp
-          tag: $(git rev-parse --short HEAD)
+          tag:
+            - latest
+            - $(git rev-parse --short HEAD)
           only-if: test "$(git branch --show-current)" = main
   ```
 * ready-on: a string (only valid on a service). Any step that depends on this

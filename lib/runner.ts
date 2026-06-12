@@ -312,10 +312,34 @@ export async function runPipeline(
   };
 
   /**
+   * Resolve one configured push tag: a `$(command)` value is evaluated on the
+   * host and its trimmed stdout becomes the tag; anything else is used as-is.
+   * A command that fails or prints nothing throws, failing the step.
+   */
+  const resolvePushTag = async (step: Step, raw: string): Promise<string> => {
+    const command = /^\$\((.*)\)$/s.exec(raw)?.[1];
+    if (command === undefined) return raw;
+    const result = await shell(command);
+    if (result.code !== 0) {
+      throw new Error(
+        `Step "${step.name}" push tag command failed with exit code ${result.code}: ${command}`,
+      );
+    }
+    const tag = result.stdout.trim();
+    if (tag === "") {
+      throw new Error(
+        `Step "${step.name}" push tag command produced no output: ${command}`,
+      );
+    }
+    return tag;
+  };
+
+  /**
    * Push a step's built image to docker hub, as configured by its `push:`
-   * section. The push `only-if` check failing skips the push without failing
-   * the step; a `$(...)` tag command failing (or yielding nothing) fails the
-   * step, since the image cannot be pushed as intended.
+   * section — once per configured tag, in order. The push `only-if` check
+   * failing skips the push without failing the step; a `$(...)` tag command
+   * failing (or yielding nothing) fails the step, since the image cannot be
+   * pushed as intended.
    */
   const pushBuiltImage = async (step: Step): Promise<void> => {
     const push = step.push;
@@ -324,26 +348,12 @@ export async function runPipeline(
       log(`Not pushing ${step.name} (push only-if check failed: ${push.onlyIf})`);
       return;
     }
-    let tag = push.tag ?? "latest";
-    const command = /^\$\((.*)\)$/s.exec(tag)?.[1];
-    if (command !== undefined) {
-      const result = await shell(command);
-      if (result.code !== 0) {
-        throw new Error(
-          `Step "${step.name}" push tag command failed with exit code ${result.code}: ${command}`,
-        );
-      }
-      tag = result.stdout.trim();
-      if (tag === "") {
-        throw new Error(
-          `Step "${step.name}" push tag command produced no output: ${command}`,
-        );
-      }
+    for (const raw of push.tag ?? ["latest"]) {
+      const target = `${push.image}:${await resolvePushTag(step, raw)}`;
+      log(`Pushing ${step.name} as ${target}`);
+      await docker.tagImage(imageTag(step, runId), target);
+      await docker.push(target, sinkFor(step.name), step.quiet);
     }
-    const target = `${push.image}:${tag}`;
-    log(`Pushing ${step.name} as ${target}`);
-    await docker.tagImage(imageTag(step, runId), target);
-    await docker.push(target, sinkFor(step.name), step.quiet);
   };
 
   /** Stop a running service, draining its live log follower and recording when it ended. */

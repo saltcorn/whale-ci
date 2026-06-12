@@ -234,9 +234,10 @@ function optionalPush(value: unknown, step: string): PushConfig | undefined {
   if (image === undefined) {
     throw new ConfigError(`Step "${step}" key "push" must set "image"`);
   }
+  const tags = stringList(value["tag"], step, "push.tag");
   return {
     image,
-    tag: optionalString(value["tag"], step, "push.tag"),
+    tag: tags.length > 0 ? tags : undefined,
     onlyIf: optionalString(value["only-if"], step, "push.only-if"),
   };
 }

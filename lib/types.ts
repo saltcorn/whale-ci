@@ -104,11 +104,12 @@ export interface PushConfig {
   /** The repository to push to, e.g. `myorg/myapp`. */
   image: string;
   /**
-   * The tag to push as. A value of the form `$(command)` is evaluated as a
-   * shell command on the host and its trimmed stdout becomes the tag.
-   * Undefined means `latest`.
+   * The tags to push as, normalised to a list (a single `tag:` string becomes
+   * a one-element list); the image is pushed once per tag. A value of the form
+   * `$(command)` is evaluated as a shell command on the host and its trimmed
+   * stdout becomes the tag. Undefined means `latest`.
    */
-  tag?: string;
+  tag?: string[];
   /**
    * A bash command evaluated on the host after the step succeeds. The image is
    * pushed only when it exits zero; a non-zero exit skips the push without
