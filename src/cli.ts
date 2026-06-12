@@ -14,7 +14,7 @@ import {
   run,
   string,
 } from "cmd-ts";
-import { loadConfig } from "../lib/config.ts";
+import { loadConfig, restrictToStep } from "../lib/config.ts";
 import { CliGitClient } from "../lib/git.ts";
 import { GitHubStatusReporter } from "../lib/github.ts";
 import { RunStore } from "../lib/history.ts";
@@ -79,9 +79,23 @@ export const app = command({
       displayName: "config.yml",
       description: "Path to the YAML pipeline configuration file.",
     }),
+    step: positional({
+      type: optional(string),
+      displayName: "step",
+      description:
+        "Run only this step, plus the steps it (transitively) depends on. " +
+        "All other steps are skipped entirely.",
+    }),
   },
-  handler: ({ output, serve, configFile, maxConcurrency }) =>
-    serve ? runServe(configFile) : runCli(configFile, maxConcurrency, output),
+  handler: ({ output, serve, configFile, step, maxConcurrency }) => {
+    if (serve && step !== undefined) {
+      console.error("Error: a step name cannot be combined with --serve");
+      return Promise.resolve(1);
+    }
+    return serve
+      ? runServe(configFile)
+      : runCli(configFile, maxConcurrency, output, step);
+  },
 });
 
 /**
@@ -92,9 +106,13 @@ async function runCli(
   configFile: string,
   maxConcurrency: number,
   output?: string,
+  step?: string,
 ): Promise<number> {
   try {
-    const config = await loadConfig(configFile);
+    let config = await loadConfig(configFile);
+    if (step !== undefined) {
+      config = restrictToStep(config, step);
+    }
 
     // On Ctrl-C, abort the run so every container is stopped before exiting; a
     // second Ctrl-C force-quits in case teardown itself hangs.

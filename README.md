@@ -170,10 +170,21 @@ neither be a service nor depend on one.
 
 # Command-line interface
 
-whale-ci is run from npx. It takes a single argument, the name of the YML 
-configuration file. It assumes docker is installed on the host machine.
+whale-ci is run from npx. It takes the name of the YML configuration file as
+its argument. It assumes docker is installed on the host machine.
 
 `npx whale-ci ci.yml`
+
+An optional second argument names a single step to run:
+
+`npx whale-ci ci.yml test`
+
+When a step name is given, only that step is run, together with every step it
+depends on, the steps those steps depend on, and so on (implicit dependencies
+from `image`/Dockerfile `FROM` references included). All other steps are left
+out of the pipeline entirely — they are not built, run, or reported. Naming a
+step that does not exist in the config file is an error. The step argument
+cannot be combined with `--serve`.
 
 If no file is given it prints an error. If the argumnt is `--help` it prints a 
 brief help message. It validates the input yaml file and prints an error if it does not

@@ -3,6 +3,7 @@ export {
   loadConfig,
   parseConfig,
   resolveDockerfileBases,
+  restrictToStep,
 } from "./config.ts";
 export {
   buildArgs,

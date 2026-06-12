@@ -83,6 +83,36 @@ export async function resolveDockerfileBases(
 }
 
 /**
+ * Restrict a config to a single step plus everything it transitively depends
+ * on; all other steps are dropped from the pipeline. Implicit dependencies
+ * (Dockerfile bases, image references) are part of `depends` by the time a
+ * config is loaded, so they are kept too. Step order from the original config
+ * is preserved. Throws a ConfigError when `name` does not match any step.
+ */
+export function restrictToStep(config: Config, name: string): Config {
+  if (!config.steps.has(name)) {
+    throw new ConfigError(
+      `Unknown step "${name}" (steps: ${[...config.steps.keys()].join(", ")})`,
+    );
+  }
+  const keep = new Set<string>();
+  const pending = [name];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (keep.has(current)) continue;
+    keep.add(current);
+    pending.push(...config.steps.get(current)!.depends);
+  }
+  const steps = new Map<string, Step>();
+  for (const [stepName, step] of config.steps) {
+    if (keep.has(stepName)) {
+      steps.set(stepName, step);
+    }
+  }
+  return { steps, baseDir: config.baseDir };
+}
+
+/**
  * Parse and validate YAML config text. `baseDir` is the directory the file
  * lives in and is used to resolve Dockerfile build contexts.
  */

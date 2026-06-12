@@ -28,7 +28,21 @@ test("parses a lone config file", async () => {
     output: undefined,
     serve: false,
     maxConcurrency: 4,
+    step: undefined,
   });
+});
+
+test("parses an optional step name after the config file", async () => {
+  const parsed = await parseArgs(["ci.yml", "test"]);
+  assert.equal(parsed.configFile, "ci.yml");
+  assert.equal(parsed.step, "test");
+});
+
+test("the step name combines with options in any order", async () => {
+  const parsed = await parseArgs(["-o", "r.html", "ci.yml", "test"]);
+  assert.equal(parsed.configFile, "ci.yml");
+  assert.equal(parsed.step, "test");
+  assert.equal(parsed.output, "r.html");
 });
 
 test("parses --max-concurrency and defaults it to 4", async () => {
@@ -92,6 +106,6 @@ test("an unknown option is an error", async () => {
   assert.match(await parseError(["--bogus", "ci.yml"]), /[Uu]nknown/);
 });
 
-test("a second positional argument is an error", async () => {
-  assert.match(await parseError(["a.yml", "b.yml"]), /[Uu]nknown/);
+test("a third positional argument is an error", async () => {
+  assert.match(await parseError(["a.yml", "step", "extra"]), /[Uu]nknown/);
 });

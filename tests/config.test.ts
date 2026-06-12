@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseConfig, resolveDockerfileBases } from "../lib/config.ts";
+import {
+  parseConfig,
+  resolveDockerfileBases,
+  restrictToStep,
+} from "../lib/config.ts";
 import { ConfigError } from "../lib/types.ts";
 
 /** Build a Dockerfile reader from a path-suffix -> contents map. */
@@ -738,4 +742,82 @@ job:
   const job = parseConfig(yaml, "/w").steps.get("job")!;
   assert.equal(job.imageFrom, undefined);
   assert.deepEqual(job.depends, []);
+});
+
+test("restrictToStep keeps the step and its transitive dependencies", () => {
+  const yaml = `
+base:
+  image: alpine
+build:
+  image: x
+  depends: base
+test:
+  image: y
+  depends: build
+lint:
+  image: z
+docs:
+  image: w
+  depends: lint
+`;
+  const config = restrictToStep(parseConfig(yaml, "/w"), "test");
+  assert.deepEqual([...config.steps.keys()], ["base", "build", "test"]);
+  assert.equal(config.baseDir, "/w");
+});
+
+test("restrictToStep on a step with no dependencies keeps only that step", () => {
+  const yaml = `
+a:
+  image: x
+b:
+  image: y
+  depends: a
+`;
+  const config = restrictToStep(parseConfig(yaml, "/w"), "a");
+  assert.deepEqual([...config.steps.keys()], ["a"]);
+});
+
+test("restrictToStep handles diamond dependencies without duplication", () => {
+  const yaml = `
+base:
+  image: x
+left:
+  image: y
+  depends: base
+right:
+  image: z
+  depends: base
+top:
+  image: w
+  depends:
+    - left
+    - right
+`;
+  const config = restrictToStep(parseConfig(yaml, "/w"), "top");
+  assert.deepEqual([...config.steps.keys()], ["base", "left", "right", "top"]);
+});
+
+test("restrictToStep follows implicit image-reference dependencies", () => {
+  const yaml = `
+build:
+  dockerfile: ./D
+test:
+  image: build
+  command: runtests
+other:
+  image: q
+`;
+  const config = restrictToStep(parseConfig(yaml, "/w"), "test");
+  assert.deepEqual([...config.steps.keys()], ["build", "test"]);
+});
+
+test("restrictToStep rejects an unknown step name", () => {
+  const config = parseConfig(README_EXAMPLE, "/w");
+  assert.throws(
+    () => restrictToStep(config, "missing"),
+    (err: unknown) =>
+      err instanceof ConfigError &&
+      /Unknown step "missing"/.test(err.message) &&
+      /build, database, test/.test(err.message),
+  );
 });
