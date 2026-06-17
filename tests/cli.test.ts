@@ -27,6 +27,7 @@ test("parses a lone config file", async () => {
     configFile: "ci.yml",
     output: undefined,
     serve: false,
+    dumpYaml: false,
     maxConcurrency: 4,
     step: undefined,
   });
@@ -79,6 +80,12 @@ test("parses the --serve flag", async () => {
   assert.equal((await parseArgs(["ci.yml"])).serve, false);
   assert.equal((await parseArgs(["--serve", "ci.yml"])).serve, true);
   assert.equal((await parseArgs(["ci.yml", "--serve"])).serve, true);
+});
+
+test("parses the --dump-yaml flag", async () => {
+  assert.equal((await parseArgs(["ci.yml"])).dumpYaml, false);
+  assert.equal((await parseArgs(["--dump-yaml", "ci.yml"])).dumpYaml, true);
+  assert.equal((await parseArgs(["ci.yml", "--dump-yaml"])).dumpYaml, true);
 });
 
 test("parses output flag in all spellings", async () => {

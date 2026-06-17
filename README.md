@@ -214,6 +214,22 @@ At the end, whether the test succeeded or not, all running containers are stoppe
 
 `npx whale-ci --max-concurrency 8 ci.yml`
 
+* `--dump-yaml`: do not build. Instead validate the config and print it to
+  stdout with every value whale-ci evaluates on the host shown in its evaluated
+  form, to help debug a pipeline definition. The original file's key order,
+  formatting and comments are preserved; only the evaluated parts change:
+  * a `push.tag` of the form `$(command)` is replaced by the command's trimmed
+    output (with the original kept as a trailing comment); a command that fails
+    or prints nothing is left in place with a comment explaining why.
+  * a step `only-if` and a push `only-if` are run and annotated with a comment
+    saying whether they pass (and so whether the step would run / the image
+    would be pushed).
+
+  Disabled steps and bare `$VAR` references are left untouched, since the runner
+  never evaluates them. Cannot be combined with `--serve`.
+
+`npx whale-ci --dump-yaml ci.yml`
+
 * `--serve`: run as a CI server instead of running once. This starts an HTTP
   server that acts as the backend for a GitHub push webhook (see below).
 

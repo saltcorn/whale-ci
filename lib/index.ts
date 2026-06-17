@@ -5,6 +5,7 @@ export {
   resolveDockerfileBases,
   restrictToStep,
 } from "./config.ts";
+export { dumpEvaluatedConfig, type Shell } from "./dump.ts";
 export {
   buildArgs,
   CliDockerClient,

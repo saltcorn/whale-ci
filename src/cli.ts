@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import {
   binary,
@@ -15,6 +15,7 @@ import {
   string,
 } from "cmd-ts";
 import { loadConfig, restrictToStep } from "../lib/config.ts";
+import { dumpEvaluatedConfig } from "../lib/dump.ts";
 import { CliGitClient } from "../lib/git.ts";
 import { GitHubStatusReporter } from "../lib/github.ts";
 import { RunStore } from "../lib/history.ts";
@@ -65,6 +66,15 @@ export const app = command({
         "jointly by docker and incus steps (service containers do not count " +
         "toward the limit).",
     }),
+    dumpYaml: flag({
+      long: "dump-yaml",
+      description:
+        "Do not build. Instead print the config file to stdout with every " +
+        "value the runner evaluates on the host shown in its evaluated form: " +
+        "$(...) push tags are replaced by their command output, and step and " +
+        "push only-if conditions are annotated with whether they pass. Useful " +
+        "for debugging a pipeline definition.",
+    }),
     serve: flag({
       long: "serve",
       description:
@@ -87,10 +97,17 @@ export const app = command({
         "All other steps are skipped entirely.",
     }),
   },
-  handler: ({ output, serve, configFile, step, maxConcurrency }) => {
+  handler: ({ output, serve, dumpYaml, configFile, step, maxConcurrency }) => {
     if (serve && step !== undefined) {
       console.error("Error: a step name cannot be combined with --serve");
       return Promise.resolve(1);
+    }
+    if (dumpYaml && serve) {
+      console.error("Error: --dump-yaml cannot be combined with --serve");
+      return Promise.resolve(1);
+    }
+    if (dumpYaml) {
+      return runDumpYaml(configFile);
     }
     return serve
       ? runServe(configFile)
@@ -164,6 +181,29 @@ async function runCli(
     // 130 is the conventional exit code for a SIGINT-interrupted process.
     if (controller.signal.aborted) return 130;
     return result.ok ? 0 : 1;
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Print the config file to stdout with every host-evaluated value (push tags,
+ * only-if conditions) shown in its evaluated form, without running the build.
+ * The config is validated first so the usual errors still surface. Returns the
+ * process exit code: 0 on success, 1 on a config error.
+ */
+async function runDumpYaml(configFile: string): Promise<number> {
+  try {
+    // Validate the config (and resolve implicit dependencies) so a malformed
+    // file is reported just as it would be for a real run.
+    await loadConfig(configFile);
+    const text = await readFile(configFile, "utf8");
+    process.stdout.write(await dumpEvaluatedConfig(text));
+    return 0;
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Error: ${err.message}`);
