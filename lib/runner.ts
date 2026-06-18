@@ -1,4 +1,5 @@
 import {
+  cacheImageTag,
   CliDockerClient,
   commandArgv,
   type DockerClient,
@@ -127,9 +128,13 @@ export async function runPipeline(
   const liveContainers = new Set<string>();
   // Incus instances currently running, force-deleted on an interrupted run.
   const liveInstances = new Set<string>();
-  // Image tags this run has built, removed during teardown so per-run images do
-  // not accumulate on the host.
-  const builtImages = new Set<string>();
+  // Dockerfile-built images this run produced, mapping each per-run image tag to
+  // the stable cache tag it is moved to at teardown. The image itself is kept
+  // (under the cache tag) so its layers seed the next run's build cache; only the
+  // per-run tag is dropped, so these images do not accumulate on the host.
+  // Images built from a step's `command` are throwaway snapshots, purged where
+  // they are created (see `runCommands`), not here.
+  const builtImages = new Map<string, string>();
   let ok = true;
 
   // One record per step, created up front so the report keeps config order.
@@ -293,7 +298,7 @@ export async function runPipeline(
           : `Building ${step.name} (${step.dockerfile})`,
       );
       const tag = imageTag(step, runId);
-      builtImages.add(tag);
+      builtImages.set(tag, cacheImageTag(step));
       await docker.build(
         tag,
         step.dockerfile,
@@ -530,9 +535,12 @@ export async function runPipeline(
         liveInstances.delete(name);
         await incus.delete(name);
       }
-      // Drop this run's built images now that no container references them.
-      for (const tag of builtImages) {
-        await docker.removeImage(tag);
+      // Keep this run's Dockerfile-built images so they seed the next run's
+      // build cache: move each to its stable cache tag, then drop the per-run
+      // tag so the image survives (under the cache tag) without piling up.
+      for (const [runTag, cacheTag] of builtImages) {
+        await docker.tagImage(runTag, cacheTag);
+        await docker.removeImage(runTag);
       }
       await docker.removeNetwork(network);
     })();

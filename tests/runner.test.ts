@@ -523,8 +523,10 @@ test("push tags and pushes the built image after the step succeeds", async () =>
   const { ok } = await runPipeline(config, { docker, ...base });
 
   assert.equal(ok, true);
+  // The push retag happens during the step; the cache retag happens at teardown.
   assert.deepEqual(docker.kinds("tagImage"), [
     "dockerci/job:net->myorg/myapp:v1",
+    "dockerci/job:net->dockerci/job:cache",
   ]);
   assert.deepEqual(docker.kinds("push"), ["myorg/myapp:v1"]);
   // The push happens only after the step's command has succeeded.
@@ -579,6 +581,7 @@ test("a list of push tags pushes the image once per tag, in order", async () => 
     "dockerci/job:net->myorg/myapp:latest",
     "dockerci/job:net->myorg/myapp:v2",
     "dockerci/job:net->myorg/myapp:abc1234",
+    "dockerci/job:net->dockerci/job:cache",
   ]);
   assert.deepEqual(docker.kinds("push"), [
     "myorg/myapp:latest",
@@ -626,7 +629,10 @@ test("push only-if skips the push without failing the step", async () => {
   assert.equal(steps.find((s) => s.name === "job")!.status, "success");
   assert.deepEqual(checks, ['test "$BRANCH" = main']);
   assert.deepEqual(docker.kinds("push"), []);
-  assert.deepEqual(docker.kinds("tagImage"), []);
+  // The push is skipped, but the built image is still kept under its cache tag.
+  assert.deepEqual(docker.kinds("tagImage"), [
+    "dockerci/job:net->dockerci/job:cache",
+  ]);
 });
 
 test("a failing step is not pushed", async () => {
@@ -850,7 +856,13 @@ app:
   // while the base itself builds from a registry image (no override).
   assert.equal(docker.buildBaseByTag.get("dockerci/app:net"), "dockerci/base:net");
   assert.equal(docker.buildBaseByTag.get("dockerci/base:net"), undefined);
-  // Both per-run images are removed on teardown so they do not accumulate.
+  // On teardown each per-run image is moved to its stable cache tag and the
+  // per-run tag dropped, so the image is kept (to seed the next build's cache)
+  // without per-run tags accumulating on the host.
+  assert.deepEqual(
+    docker.kinds("tagImage").sort(),
+    ["dockerci/app:net->dockerci/app:cache", "dockerci/base:net->dockerci/base:cache"],
+  );
   assert.deepEqual(
     docker.kinds("removeImage").sort(),
     ["dockerci/app:net", "dockerci/base:net"],

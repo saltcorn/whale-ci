@@ -124,6 +124,18 @@ function builtImageTag(name: string, runId: string): string {
 }
 
 /**
+ * The stable, run-independent tag a Dockerfile-built step's image is kept under
+ * once a run finishes, so its layers survive on the host to seed the next run's
+ * build cache. Unlike {@link imageTag} it carries no runId, so each run
+ * overwrites the previous run's cache image instead of leaving a new per-run tag
+ * behind. Only `dockerfile` steps produce one; images built from a step's
+ * `command` are throwaway snapshots and are not kept.
+ */
+export function cacheImageTag(step: Step): string {
+  return `dockerci/${step.name}:cache`;
+}
+
+/**
  * The image named by the first `FROM` instruction in a Dockerfile, or undefined
  * if there is none. Blank lines and comments are skipped, `--platform=` (and
  * other) flags are ignored, and any `AS <stage>` suffix is dropped — only the
