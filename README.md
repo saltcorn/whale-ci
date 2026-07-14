@@ -240,7 +240,7 @@ At the end, whether the test succeeded or not, all running containers are stoppe
 With `--serve`, whale-ci runs as a long-lived HTTP server that GitHub can call as
 a [push webhook](https://docs.github.com/webhooks). The webhook is served on
 the `/webhook` path (configure GitHub's payload URL as
-`http://<host>:<port>/webhook`). Each accepted push is built and tested, and
+`http://<host>:<port>/webhook`; `application/json` content type). Each accepted push is built and tested, and
 the result is reported back to GitHub as a commit status (so it shows up as a
 check on the commit and pull request).
 
@@ -271,7 +271,17 @@ concurrently without interfering with each other.
 
 The server is configured entirely through environment variables:
 
-* `GITHUB_TOKEN`: token used to post commit statuses to the GitHub API.
+* `GITHUB_TOKEN`: token used to post commit statuses to the GitHub API. This
+  can be a [fine-grained personal access
+  token](https://github.com/settings/personal-access-tokens) (or an equivalent
+  GitHub App installation token). It only ever calls the commit-statuses
+  endpoint, so it needs exactly one repository permission — **Commit statuses:
+  Read and write** — scoped to the repository whose pushes you are building.
+  (Fine-grained tokens also carry the mandatory, automatically granted
+  **Metadata: Read-only** permission.) No `repo`/admin scope or organization
+  permissions are required. Note this token is only for the status API; the
+  credentials used to `git fetch` the pushed branch come from the serving
+  checkout's git configuration, not from `GITHUB_TOKEN`.
 * `WEBHOOK_SECRET`: shared secret used to verify webhook signatures. Requests
   with a missing or invalid signature are rejected with `401`.
 * `WORKTREE_ROOT`: directory under which the per-push git worktrees are created
