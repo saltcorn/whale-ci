@@ -49,6 +49,32 @@ test("a started run is listed as running, then finished with its report", () => 
   store.close();
 });
 
+test("update overwrites a running run's report without changing its status", () => {
+  const store = new RunStore(":memory:");
+  const id = store.start({ branch: "main", commit: "abc123" });
+
+  store.update(id, "<html>pending</html>");
+  let [run] = store.recent();
+  assert.ok(run);
+  // The run is still running, but its interim report is now available.
+  assert.equal(run.status, "running");
+  assert.equal(run.finishedAt, undefined);
+  assert.equal(run.hasReport, true);
+  assert.equal(store.report(id), "<html>pending</html>");
+
+  // A later update replaces the earlier report, still without finishing.
+  store.update(id, "<html>step 1 done</html>");
+  [run] = store.recent();
+  assert.equal(run!.status, "running");
+  assert.equal(store.report(id), "<html>step 1 done</html>");
+
+  // Finishing then records the final report and outcome.
+  store.finish(id, "success", "<html>final</html>");
+  assert.equal(store.recent()[0]!.status, "success");
+  assert.equal(store.report(id), "<html>final</html>");
+  store.close();
+});
+
 test("a run without a branch or report is handled", () => {
   const store = new RunStore(":memory:");
   const id = store.start({});

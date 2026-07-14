@@ -53,6 +53,12 @@ export function defaultDatabasePath(): string {
  */
 export interface RunHistory {
   start(run: { branch?: string; commit?: string }): number;
+  /**
+   * Overwrite a still-running run's stored HTML report, leaving its status and
+   * timestamps untouched. A server calls this repeatedly as steps finish so the
+   * report served at `/runs/<id>` updates while the run is in flight.
+   */
+  update(id: number, report: string): void;
   finish(id: number, status: RunStatus, report?: string): void;
   /**
    * Mark every still-`running` run as `error`, returning how many were changed.
@@ -101,6 +107,17 @@ export class RunStore implements RunHistory {
       )
       .run(run.branch ?? null, run.commit ?? null, Date.now());
     return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Replace a run's stored HTML report without changing its status or finish
+   * time. Used to publish the incremental report as each step of an in-flight
+   * run completes.
+   */
+  update(id: number, report: string): void {
+    this.#db
+      .prepare("UPDATE runs SET report = ? WHERE id = ?")
+      .run(report, id);
   }
 
   /** Record a run's outcome and (when one was produced) its HTML report. */

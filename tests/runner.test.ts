@@ -179,6 +179,52 @@ test("dependentsOf maps each step to the steps that depend on it", () => {
   assert.deepEqual([...deps.get("test")!], []);
 });
 
+test("onProgress reports an all-pending snapshot up front, then each step as it settles", async () => {
+  const docker = new FakeDocker();
+  const snapshots: string[][] = [];
+  const { steps } = await runPipeline(load(), {
+    docker,
+    ...base,
+    onProgress: (s) => snapshots.push(s.map((x) => `${x.name}:${x.status}`)),
+  });
+
+  // The first snapshot, emitted before any work, has every step pending.
+  assert.deepEqual(snapshots[0], [
+    "build:pending",
+    "database:pending",
+    "test:pending",
+  ]);
+  // The last snapshot reflects the fully settled run.
+  assert.deepEqual(snapshots.at(-1), [
+    "build:success",
+    "database:success",
+    "test:success",
+  ]);
+  // One snapshot up front plus one per settled step (build, database, test).
+  assert.equal(snapshots.length, 4);
+  assert.deepEqual(steps.map((s) => s.status), [
+    "success",
+    "success",
+    "success",
+  ]);
+});
+
+test("a step left unreached after a failure is reported skipped, not pending", async () => {
+  const config = parseConfig(
+    "one:\n  image: alpine\n  command: go\n" +
+      "two:\n  image: alpine\n  command: go\n  depends:\n    - one\n",
+    "/work",
+  );
+  const docker = new FakeDocker();
+  docker.runExitCodes.set("one", 1); // step one fails, so two is never reached
+  const { ok, steps } = await runPipeline(config, { docker, ...base });
+
+  assert.equal(ok, false);
+  const byName = new Map(steps.map((s) => [s.name, s.status]));
+  assert.equal(byName.get("one"), "failure");
+  assert.equal(byName.get("two"), "skipped");
+});
+
 test("happy path builds, pulls, starts service, runs job, cleans up", async () => {
   const docker = new FakeDocker();
   const { ok } = await runPipeline(load(), { docker, ...base });

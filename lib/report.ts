@@ -1,7 +1,11 @@
 import type { RunRecord, RunStatus } from "./history.ts";
 
-/** Outcome of a single step in a pipeline run. */
-export type StepStatus = "success" | "failure" | "skipped";
+/**
+ * State of a single step in a pipeline run. `pending` is a step that has not
+ * finished yet: it appears in the incremental report a server writes as soon as
+ * a run starts, and is replaced by a terminal state once the step settles.
+ */
+export type StepStatus = "success" | "failure" | "skipped" | "pending";
 
 /** The captured result of one step, used to build the HTML report. */
 export interface StepReport {
@@ -28,6 +32,7 @@ const STATUS_LABEL: Record<StepStatus, string> = {
   success: "passed",
   failure: "failed",
   skipped: "skipped",
+  pending: "pending",
 };
 
 /** Render a complete, self-contained HTML report document. */
@@ -36,12 +41,18 @@ export function renderReport(steps: StepReport[], meta: ReportMeta): string {
   const heading = meta.configFile
     ? `dockerci report — ${escapeHtml(meta.configFile)}`
     : "dockerci report";
+  const plural = steps.length === 1 ? "" : "s";
+  const pending = steps.filter((s) => s.status === "pending").length;
   const failed = steps.filter((s) => s.status === "failure").length;
-  const summary = meta.ok
-    ? `Passed · ${steps.length} step${steps.length === 1 ? "" : "s"}`
-    : `Failed · ${failed} of ${steps.length} step${
-      steps.length === 1 ? "" : "s"
-    } failed`;
+  // A report with any pending step is a run still in progress: show how far it
+  // has got rather than a (premature) pass/fail verdict.
+  const running = pending > 0;
+  const headerClass = running ? "running" : meta.ok ? "ok" : "fail";
+  const summary = running
+    ? `Running · ${steps.length - pending} of ${steps.length} step${plural} done`
+    : meta.ok
+    ? `Passed · ${steps.length} step${plural}`
+    : `Failed · ${failed} of ${steps.length} step${plural} failed`;
 
   return `<!doctype html>
 <html lang="en">
@@ -52,7 +63,7 @@ export function renderReport(steps: StepReport[], meta: ReportMeta): string {
 <style>${STYLE}</style>
 </head>
 <body>
-<header class="${meta.ok ? "ok" : "fail"}">
+<header class="${headerClass}">
   <h1>${heading}</h1>
   <p class="summary">${summary}</p>
   <p class="meta">Generated ${escapeHtml(generatedAt.toISOString())}</p>
@@ -70,12 +81,16 @@ function renderStep(step: StepReport): string {
     ? escapeHtml(step.output)
     : "<em>(no output)</em>";
   const serviceTag = step.service ? `<span class="tag">service</span>` : "";
+  // A pending step has not run, so it has no meaningful duration yet.
+  const duration = step.status === "pending"
+    ? "…"
+    : formatDuration(step.durationMs);
   return `  <details class="step ${step.status}">
     <summary>
       <span class="badge ${step.status}">${STATUS_LABEL[step.status]}</span>
       <span class="name">${escapeHtml(step.name)}</span>
       ${serviceTag}
-      <span class="duration">${formatDuration(step.durationMs)}</span>
+      <span class="duration">${duration}</span>
     </summary>
     <pre>${output}</pre>
   </details>`;
@@ -193,6 +208,7 @@ const STYLE = `
   --ok: #1a7f37;
   --fail: #cf222e;
   --skip: #9a6700;
+  --run: #1f6feb;
   --bg: #0d1117;
   --panel: #161b22;
   --border: #30363d;
@@ -213,10 +229,12 @@ header {
   border-top: 4px solid var(--ok);
 }
 header.fail { border-top-color: var(--fail); }
+header.running { border-top-color: var(--run); }
 h1 { margin: 0 0 .5rem; font-size: 1.25rem; word-break: break-all; }
 .summary { margin: 0; font-weight: 600; }
 header.ok .summary { color: var(--ok); }
 header.fail .summary { color: var(--fail); }
+header.running .summary { color: var(--run); }
 .meta { margin: .25rem 0 0; color: var(--muted); font-size: .85rem; }
 main { max-width: 60rem; margin: 0 auto; padding: 1rem 1.5rem 3rem; }
 .step {
@@ -257,6 +275,7 @@ summary::before {
 .badge.success { background: var(--ok); }
 .badge.failure { background: var(--fail); }
 .badge.skipped { background: var(--skip); }
+.badge.pending { background: var(--muted); }
 .tag {
   font-size: .72rem;
   color: var(--muted);

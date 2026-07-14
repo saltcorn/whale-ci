@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CiServer, type JobResult, serverConfigFromEnv, verifyCheckout } from "../lib/server.ts";
+import { CiServer, type JobResult, type RunJob, serverConfigFromEnv, verifyCheckout } from "../lib/server.ts";
 import type { CommitState, StatusReporter } from "../lib/github.ts";
 import type { GitClient } from "../lib/git.ts";
 import { RunStore } from "../lib/history.ts";
@@ -84,7 +84,7 @@ interface Harness {
 
 /** Start a CiServer on an ephemeral port with the given run outcome. */
 async function startServer(
-  run: (dir: string) => Promise<JobResult>,
+  run: RunJob,
   git = new FakeGit("/repo"),
   publicUrl?: string,
 ): Promise<Harness> {
@@ -100,9 +100,9 @@ async function startServer(
     status,
     store,
     publicUrl,
-    run: (dir) => {
+    run: (dir, onReport) => {
       runDirs.push(dir);
-      return run(dir);
+      return run(dir, onReport);
     },
     log: () => {},
   });
@@ -111,7 +111,7 @@ async function startServer(
 }
 
 /** A run stub that always finishes with `ok` and a small fixed report. */
-function fixedRun(ok: boolean): (dir: string) => Promise<JobResult> {
+function fixedRun(ok: boolean): RunJob {
   return async () => ({ ok, report: `<html>report ${ok}</html>` });
 }
 
@@ -491,6 +491,40 @@ test("a finished run's report is served and an unknown run is 404", async () => 
 
     const missing = await fetch(`http://127.0.0.1:${server.port}/runs/99`);
     assert.equal(missing.status, 404);
+  } finally {
+    await server.close();
+  }
+});
+
+test("the run's report is published and updated while the run is still in flight", async () => {
+  // A run that publishes an initial report, then a second one, and blocks so
+  // the interim report can be observed before the run finishes.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const run: RunJob = async (_dir, onReport) => {
+    onReport("<html>pending</html>");
+    onReport("<html>step 1 done</html>");
+    await gate;
+    return { ok: true, report: "<html>final</html>" };
+  };
+  const { server, store } = await startServer(run);
+  try {
+    await postWebhook(server, "push", PUSH);
+    // Let the job reach the blocked run() so both interim reports are stored.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const runId = store.recent()[0]!.id;
+    // The run is still running, yet its latest interim report is already served.
+    assert.equal(store.recent()[0]!.status, "running");
+    const interim = await fetch(`http://127.0.0.1:${server.port}/runs/${runId}`);
+    assert.equal(await interim.text(), "<html>step 1 done</html>");
+
+    release();
+    await server.drain();
+    // Once finished, the final report replaces the interim one.
+    const final = await fetch(`http://127.0.0.1:${server.port}/runs/${runId}`);
+    assert.equal(await final.text(), "<html>final</html>");
+    assert.equal(store.recent()[0]!.status, "success");
   } finally {
     await server.close();
   }

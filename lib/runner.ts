@@ -54,6 +54,13 @@ export interface RunnerOptions {
    * Service containers do not count toward the limit. Defaults to 4.
    */
   maxConcurrency?: number;
+  /**
+   * Invoked with an ordered snapshot of every step's report the moment a step
+   * settles (success, failure or skipped), and once before any step starts with
+   * all steps `pending`. Lets a caller render an incremental report that updates
+   * as the run progresses. The snapshot is a fresh copy each call.
+   */
+  onProgress?: (steps: StepReport[]) => void;
 }
 
 /** Outcome of a whole pipeline run. */
@@ -138,17 +145,26 @@ export async function runPipeline(
   let ok = true;
 
   // One record per step, created up front so the report keeps config order.
+  // Steps start `pending` and are moved to a terminal state as they settle, so
+  // an incremental report rendered mid-run shows what is done and what is not.
   const records = new Map<string, StepRecord>();
   for (const [name, step] of config.steps) {
     records.set(name, {
       name,
       service: step.service,
-      status: "success",
+      status: "pending",
       startedAt: 0,
       endedAt: undefined,
       output: "",
     });
   }
+
+  // Notify the caller with a fresh snapshot whenever a step settles (and once up
+  // front, all pending), so a server can rewrite its report as the run proceeds.
+  const onProgress = options.onProgress;
+  const emitProgress = onProgress === undefined
+    ? (): void => {}
+    : (): void => onProgress(toReports(config, records));
 
   const containerName = (name: string): string => `${network}-${name}`;
 
@@ -486,8 +502,10 @@ export async function runPipeline(
           }
         });
         await pushBuiltImage(step);
-        // A service keeps running; it is stopped (and its end recorded) by
-        // finish() / teardown once no longer needed.
+        // A started service counts as passed for the report; it keeps running
+        // and is stopped (and its end recorded) by finish() / teardown once no
+        // longer needed.
+        record.status = "success";
         return;
       }
 
@@ -506,12 +524,17 @@ export async function runPipeline(
       // The push happens outside the timeout budget: that covers the step's
       // execution, not the upload of its image.
       await pushBuiltImage(step);
+      record.status = "success";
       record.endedAt = Date.now();
       await finish(step);
     } catch (err) {
       record.status = "failure";
       if (record.endedAt === undefined) record.endedAt = Date.now();
       throw err;
+    } finally {
+      // The step has reached a terminal state (or is a started service): let the
+      // caller re-render its report to reflect this step's outcome.
+      emitProgress();
     }
   };
 
@@ -557,6 +580,10 @@ export async function runPipeline(
   // then skips every step and the finally still tears the network down.
   signal?.addEventListener("abort", onAbort, { once: true });
 
+  // Emit the initial, all-pending report before any work starts, so a server
+  // can publish it the moment the run begins.
+  emitProgress();
+
   await docker.createNetwork(network);
   try {
     await runScheduled(config, processStep, signal, options.maxConcurrency ?? 4);
@@ -569,6 +596,14 @@ export async function runPipeline(
   }
 
   if (signal?.aborted) ok = false;
+
+  // Any step left pending never ran — an earlier failure or an interrupt stopped
+  // the schedule before it was reached. Record it as skipped so the final report
+  // shows a settled outcome rather than a step stuck pending forever.
+  for (const record of records.values()) {
+    if (record.status === "pending") record.status = "skipped";
+  }
+
   return { ok, steps: toReports(config, records) };
 }
 

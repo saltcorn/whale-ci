@@ -261,7 +261,11 @@ The server also serves a small dashboard:
 * `/` lists the recent runs from the [run history](#run-history), newest
   first — still-running ones included — showing each run's branch, start date
   and outcome (pass/fail), with a link to its HTML report.
-* `/runs/<id>` serves the stored HTML report of a finished run.
+* `/runs/<id>` serves the stored HTML report of a run. The report is written the
+  moment a run starts, with every step marked **pending**, and is rewritten as
+  each step finishes — so reloading the page shows progress as it happens, even
+  though the report is not streamed. A run still in flight shows a **running**
+  header; the final pass/fail verdict appears once it completes.
 
 Requests to any other path get a `404`.
 
@@ -275,7 +279,9 @@ serving checkout itself. Instead, for each push it:
    `PUBLIC_URL` is set);
 3. fetches the pushed branch and adds a detached **git worktree**, under
    `WORKTREE_ROOT`, checked out at the exact pushed commit;
-4. loads the config file from that worktree and runs the pipeline there;
+4. loads the config file from that worktree and runs the pipeline there,
+   publishing the run's report (all steps pending) as it starts and rewriting it
+   as each step finishes;
 5. posts a `success` or `failure` (or `error`) commit status; and
 6. removes the worktree.
 
@@ -484,8 +490,11 @@ new `GITHUB_TOKEN` or `WEBHOOK_SECRET`, edit `/etc/whale-ci.env` and run
 Every run — one-shot CLI runs and webhook-triggered server runs alike — is
 recorded in an SQLite database (using Node's built-in `node:sqlite`). A run is
 inserted as `running` when it starts and updated with its outcome (`success`,
-`failure` or `error`) and its self-contained HTML report when it finishes. The
-server's dashboard at `/` is rendered from this database.
+`failure` or `error`) when it finishes. A server run's self-contained HTML
+report is stored as soon as the run starts (all steps pending) and rewritten in
+place as each step finishes, so it is available while the run is still in flight;
+a one-shot CLI run stores its report once, at the end. The server's dashboard at
+`/` is rendered from this database.
 
 The database lives at `runs.db` in the customary per-user application data
 directory:

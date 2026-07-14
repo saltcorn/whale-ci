@@ -63,6 +63,20 @@ test("overall pass/fail is reflected in the header", () => {
   assert.ok(failed.includes("1 of 3 steps failed"));
 });
 
+test("a report with pending steps shows a running header and pending badges", () => {
+  const steps: StepReport[] = [
+    { name: "build", service: false, status: "success", durationMs: 100, output: "" },
+    { name: "test", service: false, status: "pending", durationMs: 0, output: "" },
+  ];
+  // Even rendered as not-ok, a pending step means the run is still in progress.
+  const html = renderReport(steps, { ok: false });
+  assert.ok(html.includes("Running · 1 of 2 steps done"));
+  assert.ok(/<header class="running"/.test(html));
+  assert.ok(html.includes(`class="badge pending">pending`));
+  // A pending step shows an ellipsis rather than a (meaningless) duration.
+  assert.ok(html.includes(`<span class="duration">…</span>`));
+});
+
 test("empty output renders a placeholder", () => {
   const html = renderReport(
     [{ name: "x", service: false, status: "success", durationMs: 0, output: "" }],

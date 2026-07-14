@@ -5,7 +5,7 @@ import { loadConfig } from "./config.ts";
 import { type GitClient, slugifyBranch } from "./git.ts";
 import { parsePushEvent, type PushEvent, type StatusReporter, verifySignature } from "./github.ts";
 import type { RunHistory } from "./history.ts";
-import { renderDashboard, renderReport } from "./report.ts";
+import { renderDashboard, renderReport, type StepReport } from "./report.ts";
 import { runPipeline } from "./runner.ts";
 import { ConfigError } from "./types.ts";
 
@@ -100,8 +100,17 @@ export interface JobResult {
   report?: string;
 }
 
-/** How a checked-out worktree is built and run; injectable for tests. */
-export type RunJob = (worktreeDir: string) => Promise<JobResult>;
+/**
+ * How a checked-out worktree is built and run; injectable for tests. `onReport`
+ * may be called any number of times with successive versions of the run's HTML
+ * report — once when the run starts (all steps pending) and again as each step
+ * finishes — so the server can publish an incrementally updating report. The
+ * final report is returned in the {@link JobResult}.
+ */
+export type RunJob = (
+  worktreeDir: string,
+  onReport: (report: string) => void,
+) => Promise<JobResult>;
 
 export interface CiServerOptions {
   /** Root of the git checkout to create worktrees from. */
@@ -126,8 +135,10 @@ export interface CiServerOptions {
   publicUrl?: string;
   /**
    * Build and run the pipeline for a worktree, resolving with the outcome and
-   * the HTML report. Defaults to loading `configFile` from the worktree and
-   * running it with output capture, rendering the standard report.
+   * the final HTML report and calling `onReport` with each interim report as the
+   * run progresses. Defaults to loading `configFile` from the worktree and
+   * running it with output capture, publishing a report that starts all-pending
+   * and is rewritten as each step finishes.
    */
   run?: RunJob;
   /** Sink for progress messages; defaults to console.error. */
@@ -181,16 +192,17 @@ export class CiServer {
     if (orphaned > 0) {
       this.#log(`Marked ${orphaned} orphaned running job(s) as errored`);
     }
-    this.#run = options.run ?? (async (dir) => {
+    this.#run = options.run ?? (async (dir, onReport) => {
       const config = await loadConfig(resolve(dir, this.#configFile));
-      const result = await runPipeline(config, { captureOutput: true });
-      return {
-        ok: result.ok,
-        report: renderReport(result.steps, {
-          ok: result.ok,
-          configFile: this.#configFile,
-        }),
-      };
+      const render = (steps: StepReport[], ok: boolean): string =>
+        renderReport(steps, { ok, configFile: this.#configFile });
+      const result = await runPipeline(config, {
+        captureOutput: true,
+        // A run in progress has no verdict yet, so render interim reports as not
+        // ok; renderReport shows a "running" header while any step is pending.
+        onProgress: (steps) => onReport(render(steps, false)),
+      });
+      return { ok: result.ok, report: render(result.steps, result.ok) };
     });
     this.#server = createServer((req, res) => {
       void this.#handle(req, res);
@@ -332,7 +344,12 @@ export class CiServer {
         created = true;
       });
 
-      const { ok, report } = await this.#run(worktreeDir);
+      // Publish each interim report as the run progresses, so the report page
+      // at /runs/<id> updates live even though we do not stream.
+      const { ok, report } = await this.#run(
+        worktreeDir,
+        (interim) => this.#store.update(runId, interim),
+      );
       this.#store.finish(runId, ok ? "success" : "failure", report);
       this.#log(`CI ${ok ? "passed" : "failed"}: ${repo} ${branch}@${short}`);
       await this.#report(
