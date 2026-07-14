@@ -26,6 +26,11 @@ export interface StatusReporter {
     sha: string,
     state: CommitState,
     description: string,
+    /**
+     * URL GitHub links to as the status's "Details" — the run's dashboard
+     * report page. Omitted when the server has no configured public URL.
+     */
+    targetUrl?: string,
   ): Promise<void>;
 }
 
@@ -102,6 +107,7 @@ export class GitHubStatusReporter implements StatusReporter {
     sha: string,
     state: CommitState,
     description: string,
+    targetUrl?: string,
   ): Promise<void> {
     const response = await fetch(statusUrl(repo, sha), {
       method: "POST",
@@ -117,6 +123,9 @@ export class GitHubStatusReporter implements StatusReporter {
         state,
         description: description.slice(0, 140),
         context: this.#context,
+        // Only sent when a public URL is configured; GitHub renders it as the
+        // status's "Details" link.
+        ...(targetUrl !== undefined ? { target_url: targetUrl } : {}),
       }),
     });
     if (!response.ok) {

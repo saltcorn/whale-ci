@@ -59,15 +59,18 @@ class FakeGit implements GitClient {
 /** Records every commit status posted. */
 class FakeStatus implements StatusReporter {
   readonly states: CommitState[] = [];
-  readonly reports: Array<{ sha: string; state: CommitState; description: string }> = [];
+  readonly reports: Array<
+    { sha: string; state: CommitState; description: string; targetUrl?: string }
+  > = [];
   async report(
     _repo: string,
     sha: string,
     state: CommitState,
     description: string,
+    targetUrl?: string,
   ): Promise<void> {
     this.states.push(state);
-    this.reports.push({ sha, state, description });
+    this.reports.push({ sha, state, description, targetUrl });
   }
 }
 
@@ -83,6 +86,7 @@ interface Harness {
 async function startServer(
   run: (dir: string) => Promise<JobResult>,
   git = new FakeGit("/repo"),
+  publicUrl?: string,
 ): Promise<Harness> {
   const status = new FakeStatus();
   const store = new RunStore(":memory:");
@@ -95,6 +99,7 @@ async function startServer(
     git,
     status,
     store,
+    publicUrl,
     run: (dir) => {
       runDirs.push(dir);
       return run(dir);
@@ -150,7 +155,19 @@ test("serverConfigFromEnv reads and validates the four env vars", () => {
     webhookSecret: "sec",
     worktreeRoot: "/wt",
     listenPort: 8080,
+    publicUrl: undefined,
   });
+});
+
+test("serverConfigFromEnv reads the optional PUBLIC_URL", () => {
+  const env = serverConfigFromEnv({
+    GITHUB_TOKEN: "tok",
+    WEBHOOK_SECRET: "sec",
+    WORKTREE_ROOT: "/wt",
+    LISTEN_PORT: "8080",
+    PUBLIC_URL: "https://ci.example.com",
+  });
+  assert.equal(env.publicUrl, "https://ci.example.com");
 });
 
 test("serverConfigFromEnv rejects a missing variable", () => {
@@ -281,6 +298,41 @@ test("a failing pipeline reports failure but still cleans up", async () => {
     await server.drain();
     assert.deepEqual(status.states, ["pending", "failure"]);
     assert.ok(git.calls.some((c) => c.startsWith("remove ")));
+  } finally {
+    await server.close();
+  }
+});
+
+test("with a public URL, statuses link to the run's report page", async () => {
+  const { server, status, store } = await startServer(
+    fixedRun(true),
+    new FakeGit("/repo"),
+    "https://ci.example.com/",
+  );
+  try {
+    await postWebhook(server, "push", PUSH);
+    await server.drain();
+    const runId = store.recent()[0]!.id;
+    // Trailing slash on the public URL is normalised away.
+    const expected = `https://ci.example.com/runs/${runId}`;
+    assert.deepEqual(
+      status.reports.map((r) => r.targetUrl),
+      [expected, expected],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("without a public URL, statuses carry no target URL", async () => {
+  const { server, status } = await startServer(fixedRun(true));
+  try {
+    await postWebhook(server, "push", PUSH);
+    await server.drain();
+    assert.deepEqual(
+      status.reports.map((r) => r.targetUrl),
+      [undefined, undefined],
+    );
   } finally {
     await server.close();
   }

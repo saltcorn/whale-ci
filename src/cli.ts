@@ -254,12 +254,13 @@ async function runServe(configFile: string): Promise<number> {
       git,
       status: new GitHubStatusReporter(env.githubToken),
       store,
+      publicUrl: env.publicUrl,
     });
 
     await server.listen(env.listenPort);
     console.error(
       `whale-ci serving webhooks on port ${env.listenPort} ` +
-        `(dashboard at http://localhost:${env.listenPort}/, ` +
+        `(dashboard at ${env.publicUrl ?? `http://localhost:${env.listenPort}`}/, ` +
         `checkout ${repoRoot}, worktrees under ${env.worktreeRoot})`,
     );
 

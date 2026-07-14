@@ -19,6 +19,11 @@ export interface ServerEnv {
   worktreeRoot: string;
   /** TCP port the webhook server listens on. */
   listenPort: number;
+  /**
+   * Externally-reachable base URL of the dashboard, used to link commit
+   * statuses to their run reports. Undefined when `PUBLIC_URL` is unset.
+   */
+  publicUrl?: string;
 }
 
 /**
@@ -51,7 +56,13 @@ export function serverConfigFromEnv(
     );
   }
 
-  return { githubToken, webhookSecret, worktreeRoot, listenPort };
+  // Optional: when set, commit statuses link back to the run's dashboard page.
+  const publicUrlRaw = env["PUBLIC_URL"];
+  const publicUrl = publicUrlRaw !== undefined && publicUrlRaw.trim() !== ""
+    ? publicUrlRaw.trim()
+    : undefined;
+
+  return { githubToken, webhookSecret, worktreeRoot, listenPort, publicUrl };
 }
 
 /**
@@ -108,6 +119,12 @@ export interface CiServerOptions {
   /** Run history every job is recorded in, served on the dashboard at `/`. */
   store: RunHistory;
   /**
+   * Externally-reachable base URL of this dashboard (no trailing slash), used
+   * to build the `target_url` linking each commit status to its run's report.
+   * When omitted, statuses are posted without a "Details" link.
+   */
+  publicUrl?: string;
+  /**
    * Build and run the pipeline for a worktree, resolving with the outcome and
    * the HTML report. Defaults to loading `configFile` from the worktree and
    * running it with output capture, rendering the standard report.
@@ -131,6 +148,7 @@ export class CiServer {
   readonly #git: GitClient;
   readonly #status: StatusReporter;
   readonly #store: RunHistory;
+  readonly #publicUrl?: string;
   readonly #run: RunJob;
   readonly #log: (message: string) => void;
   readonly #server: Server;
@@ -153,6 +171,8 @@ export class CiServer {
     this.#git = options.git;
     this.#status = options.status;
     this.#store = options.store;
+    // Normalise away a trailing slash so `${publicUrl}/runs/<id>` is well-formed.
+    this.#publicUrl = options.publicUrl?.replace(/\/+$/, "");
     this.#log = options.log ?? ((m) => console.error(m));
     // Reconcile runs left `running` by a previous crash: this process now owns
     // the history, and any run still marked running was orphaned when the old
@@ -290,7 +310,17 @@ export class CiServer {
     this.#log(`CI start: ${repo} ${branch}@${short} -> ${worktreeDir}`);
 
     const runId = this.#store.start({ branch, commit: sha });
-    await this.#report(repo, sha, "pending", `Running CI for ${branch}`);
+    // Links GitHub's status "Details" straight to this run's report page.
+    const targetUrl = this.#publicUrl === undefined
+      ? undefined
+      : `${this.#publicUrl}/runs/${runId}`;
+    await this.#report(
+      repo,
+      sha,
+      "pending",
+      `Running CI for ${branch}`,
+      targetUrl,
+    );
 
     let created = false;
     try {
@@ -310,12 +340,13 @@ export class CiServer {
         sha,
         ok ? "success" : "failure",
         ok ? "CI passed" : "CI failed",
+        targetUrl,
       );
     } catch (err) {
       const message = (err as Error).message;
       this.#store.finish(runId, "error");
       this.#log(`CI error: ${repo} ${branch}@${short}: ${message}`);
-      await this.#report(repo, sha, "error", message);
+      await this.#report(repo, sha, "error", message, targetUrl);
     } finally {
       if (created) {
         await this.#withGitLock(() =>
@@ -345,9 +376,10 @@ export class CiServer {
     sha: string,
     state: Parameters<StatusReporter["report"]>[2],
     description: string,
+    targetUrl?: string,
   ): Promise<void> {
     try {
-      await this.#status.report(repo, sha, state, description);
+      await this.#status.report(repo, sha, state, description, targetUrl);
     } catch (err) {
       this.#log(`Failed to report ${state} status: ${(err as Error).message}`);
     }

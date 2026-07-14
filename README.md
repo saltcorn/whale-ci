@@ -271,7 +271,8 @@ different branches) may be in flight at once, the server never builds in the
 serving checkout itself. Instead, for each push it:
 
 1. verifies the webhook's `X-Hub-Signature-256` against `WEBHOOK_SECRET`;
-2. posts a `pending` commit status;
+2. posts a `pending` commit status (linking to the run's report page when
+   `PUBLIC_URL` is set);
 3. fetches the pushed branch and adds a detached **git worktree**, under
    `WORKTREE_ROOT`, checked out at the exact pushed commit;
 4. loads the config file from that worktree and runs the pipeline there;
@@ -299,12 +300,18 @@ The server is configured entirely through environment variables:
 * `WORKTREE_ROOT`: directory under which the per-push git worktrees are created
   (created if it does not exist).
 * `LISTEN_PORT`: TCP port the webhook server listens on.
+* `PUBLIC_URL` (optional): the externally-reachable base URL of the dashboard,
+  e.g. `https://ci.example.com`. When set, each commit status is posted with a
+  `target_url` of `<PUBLIC_URL>/runs/<id>`, so the **Details** link next to the
+  check in the GitHub pull request opens that run's report page. When unset,
+  statuses are posted without a link (unchanged behaviour).
 
 ```sh
 export GITHUB_TOKEN=ghp_...
 export WEBHOOK_SECRET=$(openssl rand -hex 20)
 export WORKTREE_ROOT=/var/tmp/whale-ci
 export LISTEN_PORT=8080
+export PUBLIC_URL=https://ci.example.com   # optional; links checks to reports
 npx whale-ci --serve ci.yml
 ```
 
@@ -406,6 +413,7 @@ GITHUB_TOKEN=ghp_...
 WEBHOOK_SECRET=replace-me
 WORKTREE_ROOT=/var/lib/whale-ci/worktrees
 LISTEN_PORT=8080
+PUBLIC_URL=https://ci.example.com
 EOF
 chown root:whaleci /etc/whale-ci.env
 chmod 640 /etc/whale-ci.env
