@@ -290,6 +290,165 @@ npx whale-ci --serve ci.yml
 and tag pushes are skipped. Press Ctrl-C to stop the server; it waits for any
 in-flight CI jobs to finish before exiting.
 
+## Running as a systemd service
+
+The instructions below set up whale-ci as a persistent, unprivileged systemd
+service on a freshly installed **Debian 13 (trixie)** VM. They assume you are
+starting from a bare system and have `root` (or `sudo`) access. All commands are
+run as `root` unless noted otherwise.
+
+### 1. Install the prerequisites
+
+whale-ci needs Node.js (≥ 22.18), Docker, `git` and `openssl`. Debian 13 ships
+Node.js 22, which is new enough. Start with the base tools:
+
+```sh
+# Base tools and Node.js from Debian
+apt-get update
+apt-get install -y nodejs npm git openssl ca-certificates curl
+```
+
+For Docker you have two options.
+
+whale-ci only uses the core Docker Engine (`docker build`, `docker run`,
+`docker network`, `docker logs`) — it does not use Compose — so a plain engine
+install is all that is required.
+
+**Option A — Docker's official apt repository (recommended).** This tracks the
+current Docker Engine release rather than the version frozen at Debian's
+release. Since whale-ci builds images, staying close to upstream is the safer
+default:
+
+```sh
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg \
+  -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io
+systemctl enable --now docker
+```
+
+**Option B — Debian's own packages.** Simpler, all from the distro, but the
+engine version is frozen at Debian's release and may lag upstream:
+
+```sh
+apt-get install -y docker.io
+systemctl enable --now docker
+```
+
+Confirm the versions are recent enough:
+
+```sh
+node --version    # v22.18 or newer
+docker --version
+```
+
+### 2. Create the `whaleci` service user
+
+Create a dedicated system user to own and run the service. It needs a home
+directory (the run-history database lives under it) and membership in the
+`docker` group so it can talk to the Docker daemon.
+
+```sh
+# System account with a home dir and no login shell
+adduser --system --group --home /home/whaleci --shell /usr/sbin/nologin whaleci
+
+# Allow the user to use Docker
+usermod -aG docker whaleci
+```
+
+### 3. Fetch a checkout to serve from
+
+The server must be started **from the root of a git checkout** that contains the
+config file. Clone the repository you want to build into a directory owned by
+`whaleci`:
+
+```sh
+sudo -u whaleci git clone https://github.com/<you>/<your-repo>.git \
+  /home/whaleci/checkout
+```
+
+### 4. Create the environment file
+
+Store the server's configuration (see the variables listed above) in a
+root-owned file that only `whaleci` can read, since it holds secrets:
+
+```sh
+umask 077
+cat > /etc/whale-ci.env <<'EOF'
+GITHUB_TOKEN=ghp_...
+WEBHOOK_SECRET=replace-me
+WORKTREE_ROOT=/var/lib/whale-ci/worktrees
+LISTEN_PORT=8080
+EOF
+chown root:whaleci /etc/whale-ci.env
+chmod 640 /etc/whale-ci.env
+```
+
+Generate a fresh webhook secret with `openssl rand -hex 20` and use the same
+value when you configure the webhook in GitHub.
+
+Create the worktree root and hand it to the service user:
+
+```sh
+install -d -o whaleci -g whaleci /var/lib/whale-ci/worktrees
+```
+
+### 5. Install the systemd unit
+
+Write the following to `/etc/systemd/system/whale-ci.service`:
+
+```ini
+[Unit]
+Description=whale-ci GitHub webhook backend
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=whaleci
+Group=whaleci
+WorkingDirectory=/home/whaleci/checkout
+EnvironmentFile=/etc/whale-ci.env
+ExecStart=/usr/bin/npx whale-ci --serve ci.yml
+Restart=on-failure
+RestartSec=5
+# Let in-flight CI jobs finish on stop (matches Ctrl-C behaviour)
+KillSignal=SIGINT
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Adjust `WorkingDirectory` and the `ci.yml` argument to match your checkout and
+config filename. `npx` will download whale-ci on first start; to avoid the
+network fetch (and pin a version) you can instead
+`sudo -u whaleci npm install -g whale-ci` and set
+`ExecStart=/usr/bin/whale-ci --serve ci.yml`.
+
+### 6. Enable and start the service
+
+```sh
+systemctl daemon-reload
+systemctl enable --now whale-ci.service
+
+# Check status and follow the logs
+systemctl status whale-ci.service
+journalctl -u whale-ci.service -f
+```
+
+The dashboard is now reachable at `http://<host>:8080/` and the webhook endpoint
+at `http://<host>:8080/webhook`. The run-history database is created under the
+service user's home at `/home/whaleci/.local/share/whale-ci/runs.db`. To apply a
+new `GITHUB_TOKEN` or `WEBHOOK_SECRET`, edit `/etc/whale-ci.env` and run
+`systemctl restart whale-ci.service`.
+
 # Run history
 
 Every run — one-shot CLI runs and webhook-triggered server runs alike — is
