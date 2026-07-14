@@ -61,6 +61,12 @@ export interface Step {
   /** Ports to publish. */
   ports: number[];
   /**
+   * Extra host-to-IP mappings to add to the container's `/etc/hosts`, as
+   * `host:ip` strings (like docker compose's `extra_hosts`). Each is passed to
+   * `docker run` as `--add-host`. Defaults to `[]`.
+   */
+  extraHosts: string[];
+  /**
    * Readiness marker for a service. When set, steps that depend on this one are
    * not started until this exact string has appeared in the service's output.
    * Only valid on a service step.

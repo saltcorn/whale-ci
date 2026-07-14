@@ -154,6 +154,13 @@ export class CiServer {
     this.#status = options.status;
     this.#store = options.store;
     this.#log = options.log ?? ((m) => console.error(m));
+    // Reconcile runs left `running` by a previous crash: this process now owns
+    // the history, and any run still marked running was orphaned when the old
+    // process died, so it can never finish. Mark them as errored on startup.
+    const orphaned = this.#store.failRunning();
+    if (orphaned > 0) {
+      this.#log(`Marked ${orphaned} orphaned running job(s) as errored`);
+    }
     this.#run = options.run ?? (async (dir) => {
       const config = await loadConfig(resolve(dir, this.#configFile));
       const result = await runPipeline(config, { captureOutput: true });

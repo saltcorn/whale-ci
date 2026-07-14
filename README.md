@@ -88,6 +88,18 @@ The valid keys in each section are:
   double quotes, just as in a real shell.
 * environment: environment variables for the container, given either as a
   mapping (`KEY: value`) or a list of `KEY=value` strings.
+* extra_hosts: a list of `host:ip` mappings to add to the container's
+  `/etc/hosts`, using the same syntax as docker compose. Each entry is passed to
+  `docker run` as `--add-host`, so the step can resolve names that are not in
+  DNS. Only applies to docker steps. Example:
+
+  ```yaml
+  test:
+      image: alpine
+      extra_hosts:
+        - "somehost:162.242.195.82"
+        - "otherhost:50.31.209.229"
+  ```
 * disable: `true` or `false` (default `false`). When `true` the step is
   completely ignored: it is dropped from the pipeline and is never built, run,
   reported, or available as a dependency of other steps.

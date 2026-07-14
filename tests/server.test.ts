@@ -444,6 +444,35 @@ test("a finished run's report is served and an unknown run is 404", async () => 
   }
 });
 
+test("starting the server marks runs orphaned by a previous crash as errored", () => {
+  // Simulate a crash: two runs left `running` in the history plus one finished.
+  const store = new RunStore(":memory:");
+  const orphanA = store.start({ branch: "main", commit: "aaa" });
+  const orphanB = store.start({ branch: "feature/x", commit: "bbb" });
+  const done = store.start({ branch: "main", commit: "ccc" });
+  store.finish(done, "success", "<html>ok</html>");
+
+  // Constructing a server (as happens on startup) reconciles the orphans.
+  new CiServer({
+    repoRoot: "/repo",
+    configFile: "ci.yml",
+    secret: SECRET,
+    worktreeRoot: "/tmp/dockci-worktrees",
+    git: new FakeGit("/repo"),
+    status: new FakeStatus(),
+    store,
+    run: fixedRun(true),
+    log: () => {},
+  });
+
+  const byId = new Map(store.recent().map((run) => [run.id, run]));
+  assert.equal(byId.get(orphanA)!.status, "error");
+  assert.equal(byId.get(orphanA)!.finishedAt !== undefined, true);
+  assert.equal(byId.get(orphanB)!.status, "error");
+  // A run that had already finished is left untouched.
+  assert.equal(byId.get(done)!.status, "success");
+});
+
 test("a job that errors is recorded as an error in the run history", async () => {
   const git = new FakeGit("/repo");
   git.fetchError = new Error("network down");

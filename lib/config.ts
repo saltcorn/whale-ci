@@ -23,6 +23,7 @@ const KNOWN_KEYS = new Set([
   "command",
   "environment",
   "ports",
+  "extra_hosts",
   "disable",
   "only-if",
   "push",
@@ -233,6 +234,7 @@ function parseStep(name: string, raw: unknown): Step | undefined {
     command,
     environment: envList(raw["environment"], name),
     ports: portList(raw["ports"], name),
+    extraHosts: extraHostList(raw["extra_hosts"], name),
     readyOn,
     onlyIf: optionalString(raw["only-if"], name, "only-if"),
     delay: optionalDelay(raw["delay"], name),
@@ -542,6 +544,25 @@ function optionalTimeoutMinutes(value: unknown, step: string): number | undefine
     );
   }
   return value;
+}
+
+/**
+ * Accept an optional list of `host:ip` mappings (or a single such string),
+ * always returning a list. Each entry must contain a colon separating a
+ * non-empty host from a non-empty address, matching docker compose's
+ * `extra_hosts` syntax.
+ */
+function extraHostList(value: unknown, step: string): string[] {
+  const hosts = stringList(value, step, "extra_hosts");
+  for (const host of hosts) {
+    const colon = host.indexOf(":");
+    if (colon <= 0 || colon === host.length - 1) {
+      throw new ConfigError(
+        `Step "${step}" key "extra_hosts" entry "${host}" must be "host:ip"`,
+      );
+    }
+  }
+  return hosts;
 }
 
 /** Accept a single port number or a list of them. */

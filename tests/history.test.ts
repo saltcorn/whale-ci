@@ -63,6 +63,28 @@ test("a run without a branch or report is handled", () => {
   store.close();
 });
 
+test("failRunning marks only still-running runs as errored, leaving finished ones", () => {
+  const store = new RunStore(":memory:");
+  const running1 = store.start({ branch: "main" });
+  const running2 = store.start({ branch: "dev" });
+  const finished = store.start({ branch: "old" });
+  store.finish(finished, "success", "<html>ok</html>");
+
+  assert.equal(store.failRunning(), 2);
+
+  const byId = new Map(store.recent().map((r) => [r.id, r]));
+  assert.equal(byId.get(running1)!.status, "error");
+  assert.ok(byId.get(running1)!.finishedAt instanceof Date);
+  assert.equal(byId.get(running2)!.status, "error");
+  // The already-finished run keeps its status and report.
+  assert.equal(byId.get(finished)!.status, "success");
+  assert.equal(store.report(finished), "<html>ok</html>");
+
+  // With nothing left running a second call is a no-op.
+  assert.equal(store.failRunning(), 0);
+  store.close();
+});
+
 test("an unknown run has no report", () => {
   const store = new RunStore(":memory:");
   assert.equal(store.report(42), undefined);

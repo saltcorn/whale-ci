@@ -54,6 +54,12 @@ export function defaultDatabasePath(): string {
 export interface RunHistory {
   start(run: { branch?: string; commit?: string }): number;
   finish(id: number, status: RunStatus, report?: string): void;
+  /**
+   * Mark every still-`running` run as `error`, returning how many were changed.
+   * Used on server startup to clear runs orphaned by a previous crash, which
+   * would otherwise show as running forever.
+   */
+  failRunning(): number;
   recent(limit?: number): RunRecord[];
   report(id: number): string | undefined;
 }
@@ -104,6 +110,22 @@ export class RunStore implements RunHistory {
         "UPDATE runs SET status = ?, finished_at = ?, report = ? WHERE id = ?",
       )
       .run(status, Date.now(), report ?? null, id);
+  }
+
+  /**
+   * Mark every run still recorded as `running` as `error`, stamping it with the
+   * current time as its finish time. A server calls this at startup to reconcile
+   * runs left dangling by a previous crash: the process that owned them is gone,
+   * so they can never finish and would otherwise show as running indefinitely.
+   * Returns the number of runs updated.
+   */
+  failRunning(): number {
+    const result = this.#db
+      .prepare(
+        "UPDATE runs SET status = 'error', finished_at = ? WHERE status = 'running'",
+      )
+      .run(Date.now());
+    return Number(result.changes);
   }
 
   /** The most recent runs (running ones included), newest first. */

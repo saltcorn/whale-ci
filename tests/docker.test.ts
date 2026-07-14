@@ -20,6 +20,7 @@ function step(partial: Partial<Step> & { name: string }): Step {
     depends: [],
     environment: [],
     ports: [],
+    extraHosts: [],
     quiet: false,
     ...partial,
   };
@@ -151,6 +152,7 @@ test("runArgs builds foreground run with env and ports", () => {
     alias: "database",
     environment: ["POSTGRES_HOST_AUTH_METHOD=trust"],
     ports: [5432],
+    extraHosts: [],
   };
   assert.deepEqual(runArgs(options, false), [
     "run",
@@ -170,6 +172,35 @@ test("runArgs builds foreground run with env and ports", () => {
   ]);
 });
 
+test("runArgs passes each extra host as --add-host", () => {
+  const options: RunOptions = {
+    image: "alpine",
+    name: "net-job",
+    network: "net",
+    alias: "job",
+    environment: [],
+    ports: [],
+    extraHosts: ["somehost:162.242.195.82", "otherhost:50.31.209.229"],
+  };
+  const args = runArgs(options, false);
+  assert.deepEqual(args, [
+    "run",
+    "--rm",
+    "-i",
+    "--name",
+    "net-job",
+    "--network",
+    "net",
+    "--network-alias",
+    "job",
+    "--add-host",
+    "somehost:162.242.195.82",
+    "--add-host",
+    "otherhost:50.31.209.229",
+    "alpine",
+  ]);
+});
+
 test("runArgs omits --rm when keep is set so the container can be committed", () => {
   const options: RunOptions = {
     image: "alpine",
@@ -178,6 +209,7 @@ test("runArgs omits --rm when keep is set so the container can be committed", ()
     alias: "job",
     environment: [],
     ports: [],
+    extraHosts: [],
     keep: true,
   };
   const args = runArgs(options, false);
@@ -194,6 +226,7 @@ test("runArgs builds detached run and appends the command", () => {
     command: ["npm", "test"],
     environment: [],
     ports: [],
+    extraHosts: [],
   };
   const args = runArgs(options, true);
   assert.ok(args.includes("-d"));

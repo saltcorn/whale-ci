@@ -173,6 +173,7 @@ export async function runPipeline(
     command,
     environment: step.environment,
     ports: step.ports,
+    extraHosts: step.extraHosts,
     keep: overrides.keep,
   });
 

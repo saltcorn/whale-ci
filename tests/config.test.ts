@@ -614,6 +614,37 @@ test("normalises a single port and a list of ports", () => {
   assert.deepEqual(many.ports, [80, 443]);
 });
 
+test("parses extra_hosts as a list of host:ip strings, defaulting to empty", () => {
+  const yaml = `
+a:
+  image: x
+  extra_hosts:
+    - "somehost:162.242.195.82"
+    - "otherhost:50.31.209.229"
+`;
+  const a = parseConfig(yaml, "/w").steps.get("a")!;
+  assert.deepEqual(a.extraHosts, [
+    "somehost:162.242.195.82",
+    "otherhost:50.31.209.229",
+  ]);
+
+  assert.deepEqual(
+    parseConfig("a:\n  image: x", "/w").steps.get("a")!.extraHosts,
+    [],
+  );
+});
+
+test("rejects an extra_hosts entry without a host:ip form", () => {
+  assert.throws(
+    () => parseConfig("a:\n  image: x\n  extra_hosts:\n    - nohost", "/w"),
+    /extra_hosts.*host:ip/,
+  );
+  assert.throws(
+    () => parseConfig('a:\n  image: x\n  extra_hosts:\n    - ":1.2.3.4"', "/w"),
+    /extra_hosts.*host:ip/,
+  );
+});
+
 test("parses environment as a mapping, coercing scalars to strings", () => {
   const yaml = `
 a:

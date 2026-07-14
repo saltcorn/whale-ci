@@ -21,6 +21,8 @@ export interface RunOptions {
   /** Environment variables, as `KEY=value` strings. */
   environment: string[];
   ports: number[];
+  /** Extra `host:ip` mappings, each passed as `--add-host`. */
+  extraHosts: string[];
   /**
    * When true the container is left in place after it exits (no `--rm`) so its
    * filesystem can be committed; the caller is then responsible for removing it.
@@ -278,6 +280,9 @@ export function runArgs(options: RunOptions, detached: boolean): string[] {
   }
   for (const port of options.ports) {
     args.push("-p", `${port}:${port}`);
+  }
+  for (const host of options.extraHosts) {
+    args.push("--add-host", host);
   }
   args.push(options.image);
   if (options.command) {
