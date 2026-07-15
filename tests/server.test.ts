@@ -87,6 +87,7 @@ async function startServer(
   run: RunJob,
   git = new FakeGit("/repo"),
   publicUrl?: string,
+  trustedPrOwners?: ReadonlySet<string>,
 ): Promise<Harness> {
   const status = new FakeStatus();
   const store = new RunStore(":memory:");
@@ -100,6 +101,7 @@ async function startServer(
     status,
     store,
     publicUrl,
+    trustedPrOwners,
     run: (dir, onReport) => {
       runDirs.push(dir);
       return run(dir, onReport);
@@ -143,6 +145,20 @@ const PUSH = {
   repository: { full_name: "owner/repo" },
 };
 
+/** A `pull_request` payload for PR #7 from `bob/repo` against `owner/repo`. */
+const FORK_PR = {
+  action: "synchronize",
+  repository: { full_name: "owner/repo" },
+  pull_request: {
+    number: 7,
+    head: {
+      ref: "fork-feature",
+      sha: "f0rkc0mm1t",
+      repo: { full_name: "bob/repo", owner: { login: "bob" } },
+    },
+  },
+};
+
 test("serverConfigFromEnv reads and validates the four env vars", () => {
   const env = serverConfigFromEnv({
     GITHUB_TOKEN: "tok",
@@ -156,7 +172,20 @@ test("serverConfigFromEnv reads and validates the four env vars", () => {
     worktreeRoot: "/wt",
     listenPort: 8080,
     publicUrl: undefined,
+    // Unset TRUSTED_PR_OWNERS builds no fork pull request.
+    trustedPrOwners: new Set(),
   });
+});
+
+test("serverConfigFromEnv reads the optional TRUSTED_PR_OWNERS", () => {
+  const env = serverConfigFromEnv({
+    GITHUB_TOKEN: "tok",
+    WEBHOOK_SECRET: "sec",
+    WORKTREE_ROOT: "/wt",
+    LISTEN_PORT: "8080",
+    TRUSTED_PR_OWNERS: "alice, BoB",
+  });
+  assert.deepEqual(env.trustedPrOwners, new Set(["alice", "bob"]));
 });
 
 test("serverConfigFromEnv reads the optional PUBLIC_URL", () => {
@@ -286,6 +315,130 @@ test("a successful push runs CI in a worktree and reports success", async () => 
     // The worktree directory carries a slug of the branch and the short sha.
     assert.match(runDirs[0]!, /feature-x-deadbeefcafe-0$/);
     assert.deepEqual(status.states, ["pending", "success"]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a trusted fork PR is fetched from its pull ref and reported on the base repo", async () => {
+  const { server, git, status, runDirs } = await startServer(
+    fixedRun(true),
+    new FakeGit("/repo"),
+    undefined,
+    new Set(["bob"]),
+  );
+  try {
+    const res = await postWebhook(server, "pull_request", FORK_PR);
+    assert.equal(res.status, 202);
+    await server.drain();
+
+    // The fork is not a remote here, so the head commit comes from the base
+    // repo's pull ref rather than from a branch name that does not exist.
+    assert.deepEqual(git.calls, [
+      "fetch refs/pull/7/head",
+      `add f0rkc0mm1t ${runDirs[0]}`,
+      `remove ${runDirs[0]}`,
+    ]);
+    assert.match(runDirs[0]!, /fork-feature-f0rkc0mm1t-0$/);
+    assert.deepEqual(status.states, ["pending", "success"]);
+    assert.deepEqual(status.reports.map((r) => r.sha), ["f0rkc0mm1t", "f0rkc0mm1t"]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("an untrusted fork PR touches neither git nor the run history", async () => {
+  const { server, git, status, store } = await startServer(
+    fixedRun(true),
+    new FakeGit("/repo"),
+    undefined,
+    new Set(["alice"]),
+  );
+  try {
+    const res = await postWebhook(server, "pull_request", FORK_PR);
+    // Refused before any of the contributor's code is fetched, let alone run.
+    assert.equal(res.status, 200);
+    assert.match(await res.text(), /not in TRUSTED_PR_OWNERS/);
+    await server.drain();
+
+    assert.deepEqual(git.calls, []);
+    assert.deepEqual(status.states, []);
+    assert.deepEqual(store.recent(), []);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a fork PR is refused when no owner is allowlisted", async () => {
+  // The default construction: subscribing to the webhook event without setting
+  // TRUSTED_PR_OWNERS must not start running strangers' code.
+  const { server, git } = await startServer(fixedRun(true));
+  try {
+    const res = await postWebhook(server, "pull_request", FORK_PR);
+    assert.equal(res.status, 200);
+    await server.drain();
+    assert.deepEqual(git.calls, []);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a same-repo PR is not built a second time on top of its push event", async () => {
+  const { server, git } = await startServer(
+    fixedRun(true),
+    new FakeGit("/repo"),
+    undefined,
+    new Set(["owner"]),
+  );
+  try {
+    const payload = {
+      ...FORK_PR,
+      pull_request: {
+        ...FORK_PR.pull_request,
+        head: {
+          ...FORK_PR.pull_request.head,
+          repo: { full_name: "owner/repo", owner: { login: "owner" } },
+        },
+      },
+    };
+    const res = await postWebhook(server, "pull_request", payload);
+    assert.equal(res.status, 200);
+    await server.drain();
+    assert.deepEqual(git.calls, []);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a pull_request with an unbuildable action starts no job", async () => {
+  const { server, git } = await startServer(
+    fixedRun(true),
+    new FakeGit("/repo"),
+    undefined,
+    new Set(["bob"]),
+  );
+  try {
+    const res = await postWebhook(server, "pull_request", { ...FORK_PR, action: "closed" });
+    assert.equal(res.status, 200);
+    await server.drain();
+    assert.deepEqual(git.calls, []);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a fork PR webhook with a bad signature is rejected before the trust check", async () => {
+  const { server, git } = await startServer(
+    fixedRun(true),
+    new FakeGit("/repo"),
+    undefined,
+    new Set(["bob"]),
+  );
+  try {
+    const res = await postWebhook(server, "pull_request", FORK_PR, { secret: "wrong" });
+    assert.equal(res.status, 401);
+    await server.drain();
+    assert.deepEqual(git.calls, []);
   } finally {
     await server.close();
   }

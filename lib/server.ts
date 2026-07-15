@@ -3,7 +3,14 @@ import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadConfig } from "./config.ts";
 import { type GitClient, slugifyBranch } from "./git.ts";
-import { parsePushEvent, type PushEvent, type StatusReporter, verifySignature } from "./github.ts";
+import {
+  type CiEvent,
+  decidePullRequest,
+  parsePushEvent,
+  parseTrustedOwners,
+  type StatusReporter,
+  verifySignature,
+} from "./github.ts";
 import type { RunHistory } from "./history.ts";
 import { renderDashboard, renderReport, type StepReport } from "./report.ts";
 import { runPipeline } from "./runner.ts";
@@ -24,6 +31,11 @@ export interface ServerEnv {
    * statuses to their run reports. Undefined when `PUBLIC_URL` is unset.
    */
   publicUrl?: string;
+  /**
+   * GitHub account logins whose fork pull requests are built, from
+   * `TRUSTED_PR_OWNERS`. Empty when unset, which builds no fork pull request.
+   */
+  trustedPrOwners: ReadonlySet<string>;
 }
 
 /**
@@ -62,7 +74,18 @@ export function serverConfigFromEnv(
     ? publicUrlRaw.trim()
     : undefined;
 
-  return { githubToken, webhookSecret, worktreeRoot, listenPort, publicUrl };
+  // Optional, and empty by default: a fork pull request runs its author's code
+  // on this host, so none is built until an owner is named here.
+  const trustedPrOwners = parseTrustedOwners(env["TRUSTED_PR_OWNERS"]);
+
+  return {
+    githubToken,
+    webhookSecret,
+    worktreeRoot,
+    listenPort,
+    publicUrl,
+    trustedPrOwners,
+  };
 }
 
 /**
@@ -134,6 +157,14 @@ export interface CiServerOptions {
    */
   publicUrl?: string;
   /**
+   * GitHub account logins whose fork pull requests are built. Defaults to empty,
+   * which builds none: a pull request is built from the contributor's config
+   * file, whose `only-if` and `$(...)` commands run on this host outside any
+   * container, so listing an owner here extends them the same trust as push
+   * access to the repository.
+   */
+  trustedPrOwners?: ReadonlySet<string>;
+  /**
    * Build and run the pipeline for a worktree, resolving with the outcome and
    * the final HTML report and calling `onReport` with each interim report as the
    * run progresses. Defaults to loading `configFile` from the worktree and
@@ -146,10 +177,11 @@ export interface CiServerOptions {
 }
 
 /**
- * An HTTP server that acts as the backend for a GitHub push webhook. Each
- * accepted push is checked out into its own git worktree and run as an
- * independent CI pipeline, so pushes to different branches are handled
- * concurrently without interfering with each other or the serving checkout.
+ * An HTTP server that acts as the backend for a GitHub `push` and
+ * `pull_request` webhook. Each accepted commit is checked out into its own git
+ * worktree and run as an independent CI pipeline, so commits on different
+ * branches are handled concurrently without interfering with each other or the
+ * serving checkout.
  */
 export class CiServer {
   readonly #repoRoot: string;
@@ -160,6 +192,7 @@ export class CiServer {
   readonly #status: StatusReporter;
   readonly #store: RunHistory;
   readonly #publicUrl?: string;
+  readonly #trustedPrOwners: ReadonlySet<string>;
   readonly #run: RunJob;
   readonly #log: (message: string) => void;
   readonly #server: Server;
@@ -184,6 +217,7 @@ export class CiServer {
     this.#store = options.store;
     // Normalise away a trailing slash so `${publicUrl}/runs/<id>` is well-formed.
     this.#publicUrl = options.publicUrl?.replace(/\/+$/, "");
+    this.#trustedPrOwners = options.trustedPrOwners ?? new Set();
     this.#log = options.log ?? ((m) => console.error(m));
     // Reconcile runs left `running` by a previous crash: this process now owns
     // the history, and any run still marked running was orphaned when the old
@@ -285,6 +319,18 @@ export class CiServer {
     if (event === "ping") {
       return reply(res, 200, "pong");
     }
+
+    if (event === "pull_request") {
+      const decision = decidePullRequest(payload, this.#trustedPrOwners);
+      if (!decision.run) {
+        this.#log(`Ignoring pull request: ${decision.reason}`);
+        return reply(res, 200, `Ignored (${decision.reason})`);
+      }
+      // Accept now and run CI in the background so the webhook returns promptly.
+      this.#track(this.#runJob(decision.event));
+      return reply(res, 202, "Accepted");
+    }
+
     if (event !== "push") {
       return reply(res, 204, "");
     }
@@ -294,7 +340,6 @@ export class CiServer {
       return reply(res, 200, "Ignored (no buildable branch push)");
     }
 
-    // Accept now and run CI in the background so the webhook returns promptly.
     this.#track(this.#runJob(push));
     return reply(res, 202, "Accepted");
   }
@@ -306,14 +351,14 @@ export class CiServer {
   }
 
   /**
-   * Run one push through CI in its own worktree: report `pending`, fetch the
-   * branch, check the exact commit out into a fresh worktree, run the pipeline,
-   * then report the outcome and remove the worktree. Any failure of git or the
-   * pipeline is reported to GitHub as `error`/`failure`; status-reporting
-   * failures are logged but never abort cleanup.
+   * Run one commit through CI in its own worktree: report `pending`, fetch the
+   * event's ref, check the exact commit out into a fresh worktree, run the
+   * pipeline, then report the outcome and remove the worktree. Any failure of
+   * git or the pipeline is reported to GitHub as `error`/`failure`;
+   * status-reporting failures are logged but never abort cleanup.
    */
-  async #runJob(push: PushEvent): Promise<void> {
-    const { repo, branch, sha } = push;
+  async #runJob(event: CiEvent): Promise<void> {
+    const { repo, branch, sha, fetchRef } = event;
     const short = sha.slice(0, 12);
     const worktreeDir = resolve(
       this.#worktreeRoot,
@@ -339,7 +384,12 @@ export class CiServer {
       // Fetch and check out under the git lock; the pipeline itself runs outside
       // it so independent jobs still build concurrently in their own worktrees.
       await this.#withGitLock(async () => {
-        await this.#git.fetch(this.#repoRoot, branch);
+        await this.#git.fetch(this.#repoRoot, fetchRef);
+        // Always the SHA from the event, never the tip of what was just
+        // fetched: a push racing this run must not swap in a commit that never
+        // passed the checks in `decidePullRequest`. If the ref has since moved
+        // and the object is gone, the worktree add fails and the run errors,
+        // which is the safe direction to fail in.
         await this.#git.addWorktree(this.#repoRoot, worktreeDir, sha);
         created = true;
       });

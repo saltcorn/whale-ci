@@ -255,6 +255,7 @@ async function runServe(configFile: string): Promise<number> {
       status: new GitHubStatusReporter(env.githubToken),
       store,
       publicUrl: env.publicUrl,
+      trustedPrOwners: env.trustedPrOwners,
     });
 
     await server.listen(env.listenPort);

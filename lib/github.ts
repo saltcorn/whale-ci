@@ -6,14 +6,30 @@ import { createHmac, timingSafeEqual } from "node:crypto";
  */
 export type CommitState = "pending" | "success" | "failure" | "error";
 
-/** A push that should trigger a CI run, extracted from a webhook payload. */
-export interface PushEvent {
-  /** `owner/repo`, used to address the GitHub API. */
+/** A commit that should trigger a CI run, extracted from a webhook payload. */
+export interface CiEvent {
+  /**
+   * `owner/repo` of the repository commit statuses are posted to, used to
+   * address the GitHub API. For a pull request this is the *base* repository —
+   * the one this server builds — not the fork the commit came from.
+   */
   repo: string;
-  /** The branch that was pushed (no `refs/heads/` prefix). */
+  /**
+   * The branch the commit sits on (no `refs/heads/` prefix); for a pull request
+   * from a fork, the branch name within that fork. Used for the run history and
+   * to name the worktree, never to fetch — see {@link fetchRef}.
+   */
   branch: string;
-  /** The commit SHA at the tip of the push, which CI runs against. */
+  /** The commit SHA that CI runs against. */
   sha: string;
+  /**
+   * The ref to `git fetch` from `origin` to make {@link sha} available locally.
+   * For a push this is just the branch. For a pull request it is
+   * `refs/pull/<n>/head`: the head commit lives in a fork, which the serving
+   * checkout has no remote for, and GitHub publishes it in the base repository
+   * only under that ref.
+   */
+  fetchRef: string;
 }
 
 /**
@@ -56,12 +72,25 @@ export function verifySignature(
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/** A non-empty string property of `object`, or undefined when absent. */
+function text(object: unknown, name: string): string | undefined {
+  if (typeof object !== "object" || object === null) return undefined;
+  const value = (object as Record<string, unknown>)[name];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** A nested object property of `object`, or undefined when absent. */
+function nested(object: unknown, name: string): unknown {
+  if (typeof object !== "object" || object === null) return undefined;
+  return (object as Record<string, unknown>)[name];
+}
+
 /**
  * Extract the CI-relevant fields from a parsed `push` webhook payload, or
  * `undefined` when the push should be ignored: a branch deletion, a tag (or any
  * non-branch ref), or a payload missing the fields we need.
  */
-export function parsePushEvent(payload: unknown): PushEvent | undefined {
+export function parsePushEvent(payload: unknown): CiEvent | undefined {
   if (typeof payload !== "object" || payload === null) return undefined;
   const body = payload as Record<string, unknown>;
 
@@ -78,13 +107,117 @@ export function parsePushEvent(payload: unknown): PushEvent | undefined {
   // The all-zero SHA is GitHub's sentinel for a deleted ref.
   if (typeof sha !== "string" || /^0+$/.test(sha)) return undefined;
 
-  const repository = body["repository"];
-  const repo = typeof repository === "object" && repository !== null
-    ? (repository as Record<string, unknown>)["full_name"]
-    : undefined;
-  if (typeof repo !== "string" || repo.length === 0) return undefined;
+  const repo = text(body["repository"], "full_name");
+  if (repo === undefined) return undefined;
 
-  return { repo, branch, sha };
+  // The pushed branch exists in origin, so it is fetched by name.
+  return { repo, branch, sha, fetchRef: branch };
+}
+
+/**
+ * Pull request actions that mean the head commit is new or newly proposed, and
+ * so should be built. Every other action (`closed`, `labeled`, `edited`, ...)
+ * leaves the head commit unchanged and is ignored, so that relabelling a pull
+ * request does not rebuild it. `synchronize` is the one that fires when a
+ * contributor pushes further commits to an open pull request.
+ */
+const BUILDABLE_ACTIONS = new Set(["opened", "synchronize", "reopened"]);
+
+/** The ref under which a pull request's head commit is published in the base repo. */
+export function pullRequestRef(number: number): string {
+  return `refs/pull/${number}/head`;
+}
+
+/**
+ * Parse a `TRUSTED_PR_OWNERS` value into the set of GitHub account logins whose
+ * fork pull requests may be built. Logins are compared case-insensitively, so
+ * they are folded to lower case here. An unset, empty, or all-blank value yields
+ * an empty set — which builds no fork pull request at all. There is deliberately
+ * no wildcard: see {@link decidePullRequest} for why this list is a list of
+ * people you would grant a shell to.
+ */
+export function parseTrustedOwners(raw: string | undefined): Set<string> {
+  return new Set(
+    (raw ?? "")
+      .split(",")
+      .map((owner) => owner.trim().toLowerCase())
+      .filter((owner) => owner !== ""),
+  );
+}
+
+/** Whether a `pull_request` payload should be built, and if not, why not. */
+export type PullRequestDecision =
+  | { run: true; event: CiEvent }
+  | { run: false; reason: string };
+
+/**
+ * Decide whether a parsed `pull_request` webhook payload should be built.
+ *
+ * Building a pull request runs the *contributor's* config file, including its
+ * `only-if` and `$(...)` commands, which execute on this host outside any
+ * container. Building a fork pull request is therefore equivalent to giving its
+ * author a shell on the CI machine, and is allowed only for the account logins
+ * in `trustedOwners` (from `TRUSTED_PR_OWNERS`). With that set empty — the
+ * default — no fork pull request is ever built and this server behaves exactly
+ * as it did before pull request support existed.
+ *
+ * A pull request opened from a branch in the base repository itself is not
+ * built here: pushing that branch already produced a `push` event that built
+ * the same commit, and building both would run every such commit twice.
+ */
+export function decidePullRequest(
+  payload: unknown,
+  trustedOwners: ReadonlySet<string>,
+): PullRequestDecision {
+  const action = text(payload, "action");
+  if (action === undefined) {
+    return { run: false, reason: "malformed pull request payload" };
+  }
+  if (!BUILDABLE_ACTIONS.has(action)) {
+    return { run: false, reason: `action "${action}" leaves the head commit unchanged` };
+  }
+
+  const pull = nested(payload, "pull_request");
+  const head = nested(pull, "head");
+  const headRepo = nested(head, "repo");
+
+  const number = nested(pull, "number");
+  const sha = text(head, "sha");
+  const branch = text(head, "ref");
+  // The base repository: the one whose webhook this is, and whose API the
+  // resulting commit statuses are posted to.
+  const repo = text(nested(payload, "repository"), "full_name");
+  const headFullName = text(headRepo, "full_name");
+  const owner = text(nested(headRepo, "owner"), "login");
+
+  if (
+    typeof number !== "number" || !Number.isInteger(number) || number <= 0 ||
+    sha === undefined || branch === undefined || repo === undefined ||
+    headFullName === undefined || owner === undefined
+  ) {
+    return { run: false, reason: "malformed pull request payload" };
+  }
+
+  // Checked before the trust check so that the maintainer's own pull requests
+  // are reported as the duplicates they are rather than as untrusted forks.
+  if (headFullName.toLowerCase() === repo.toLowerCase()) {
+    return {
+      run: false,
+      reason: "same-repo pull request; its push event already built this commit",
+    };
+  }
+
+  if (!trustedOwners.has(owner.toLowerCase())) {
+    return {
+      run: false,
+      reason: `fork owner "${owner}" is not in TRUSTED_PR_OWNERS`,
+    };
+  }
+
+  return {
+    run: true,
+    event: { repo, branch, sha, fetchRef: pullRequestRef(number) },
+  };
 }
 
 /** The GitHub API URL for setting a commit's status. */

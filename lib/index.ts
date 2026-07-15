@@ -49,12 +49,20 @@ export {
 } from "./git.ts";
 export type { GitClient, GitResult } from "./git.ts";
 export {
+  decidePullRequest,
   GitHubStatusReporter,
   parsePushEvent,
+  parseTrustedOwners,
+  pullRequestRef,
   statusUrl,
   verifySignature,
 } from "./github.ts";
-export type { CommitState, PushEvent, StatusReporter } from "./github.ts";
+export type {
+  CiEvent,
+  CommitState,
+  PullRequestDecision,
+  StatusReporter,
+} from "./github.ts";
 export {
   CiServer,
   serverConfigFromEnv,
