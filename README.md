@@ -265,6 +265,19 @@ At the end, whether the test succeeded or not, all running containers are stoppe
 
 `npx whale-ci --serve --ignore-branch gh-pages,wip ci.yml`
 
+* `--server-manifest <file>`: run as a CI server for **several repositories at
+  once**, configured by a YAML manifest instead of a single pipeline config
+  file. The manifest holds the server's global settings (port, worktree root,
+  max concurrency, job timeout) and the list of repositories to serve, each with
+  its own checkout, config file, ignored branches and trusted owners. There is
+  no `config.yml` argument in this mode — a config file belongs to one
+  repository, and each repository in the manifest names its own. See
+  [Several repositories](#several-repositories---server-manifest). Cannot be
+  combined with `--serve`, `-o`, `--dump-yaml`, `--ignore-branch`, a config file
+  or a step name.
+
+`npx whale-ci --server-manifest /etc/whale-ci/servers.yml`
+
 # Server mode (GitHub webhook backend)
 
 With `--serve`, whale-ci runs as a long-lived HTTP server that GitHub can call as
@@ -412,6 +425,123 @@ already produced a `push` event that built the same commit, and building both
 would run every such commit twice. Press Ctrl-C to stop the server; it waits for
 the in-flight CI job to finish before exiting (see
 [One commit at a time](#one-commit-at-a-time)).
+
+## Several repositories (`--server-manifest`)
+
+One `--serve` server builds one repository: it is started from that
+repository's checkout and reads the config file in it. To build **several**
+repositories from a single server, start it with `--server-manifest <file>`
+instead. There is no config file argument in this mode; each repository in the
+manifest names its own.
+
+```yaml
+# Global settings: the server itself, and the defaults every repository inherits.
+port: 8080
+worktree-root: /var/tmp/whale-ci
+public-url: https://ci.example.com
+max-concurrency: 4
+job-timeout-minutes: 30
+config: ci.yml
+ignore-branch: [gh-pages]
+trusted-owners: []
+
+repositories:
+  - name: whale-ci
+    path: /srv/git/whale-ci
+    url: https://github.com/tom/whale-ci
+
+  - name: storefront
+    path: /srv/git/storefront
+    url: git@github.com:tom/storefront.git
+    config: pipeline.yml
+    ignore-branch: [gh-pages, wip]
+    trusted-owners: [alice, bob]
+    max-concurrency: 2
+    job-timeout-minutes: 90
+```
+
+The global settings are:
+
+* `port` (required): TCP port the webhook server and dashboard listen on. This
+  replaces `LISTEN_PORT`, which is not read in this mode.
+* `worktree-root` (required): directory under which the per-run git worktrees
+  are created (created if it does not exist). Every repository's worktrees live
+  under it; each is named after the repository, branch and commit, so two
+  repositories sharing a branch name never collide. Replaces `WORKTREE_ROOT`.
+* `public-url` (optional): externally-reachable base URL of the dashboard, used
+  for the **Details** link on each commit status. Overrides `PUBLIC_URL`.
+* `config`, `ignore-branch`, `trusted-owners`, `max-concurrency` and
+  `job-timeout-minutes` (all optional): the defaults every repository inherits.
+  They mean exactly what the same-named per-repository settings below mean;
+  `config` defaults to `ci.yml`, `max-concurrency` to 4 and
+  `job-timeout-minutes` to 30.
+
+Each entry under `repositories` takes:
+
+* `name` (required): a short name for the repository, unique in the manifest.
+  It is shown in the server's log and used in worktree directory names.
+* `path` (required): the git checkout on disk that worktrees are created from.
+  It must be the **root** of a checkout and must contain the repository's config
+  file; both are verified at startup, so a mistyped path fails immediately
+  rather than on the first webhook. A relative path resolves against the
+  manifest's own directory.
+* `url` (required): the repository's remote URL, in any of the forms GitHub
+  offers (`https://github.com/owner/repo`, `git@github.com:owner/repo.git`,
+  `ssh://git@github.com/owner/repo.git`, or a bare `owner/repo`). The
+  `owner/repo` in it is what arriving webhooks are matched against, so two
+  entries cannot share one URL.
+* `config` (optional): the pipeline config file, relative to the repository
+  root.
+* `ignore-branch` (optional): branch names whose webhooks are dropped for this
+  repository — the manifest equivalent of `--ignore-branch`. Accepted as a YAML
+  list or a comma-separated string.
+* `trusted-owners` (optional): GitHub logins whose **fork** pull requests are
+  built for this repository — the manifest equivalent of `TRUSTED_PR_OWNERS`.
+  Read [Fork pull requests](#fork-pull-requests-trusted_pr_owners) first: it is
+  a per-repository list, but the code it lets run is run on the one shared host.
+* `max-concurrency` (optional): test containers this repository's pipeline runs
+  in parallel.
+* `job-timeout-minutes` (optional): minutes one commit of this repository may
+  build before it is aborted and reported as failed.
+
+A setting written next to a repository **replaces** the global one rather than
+adding to it, so a repository's `trusted-owners` is always exactly the list
+written beside it — an empty list there means no fork pull request is built for
+that repository, whatever the global default says.
+
+The manifest holds no credentials, so it can live next to the checkouts it
+describes. `GITHUB_TOKEN`, `WEBHOOK_SECRET` and the optional `ADMIN_USERNAME`
+and `ADMIN_PASSWORD` are still read from the environment, exactly as described
+under [Server mode](#server-mode-github-webhook-backend); `LISTEN_PORT`,
+`WORKTREE_ROOT` and `TRUSTED_PR_OWNERS` are not read at all, since the manifest
+supplies them.
+
+```sh
+export GITHUB_TOKEN=ghp_...
+export WEBHOOK_SECRET=$(openssl rand -hex 20)
+export ADMIN_PASSWORD=$(openssl rand -hex 16)   # optional; enables /login
+npx whale-ci --server-manifest /etc/whale-ci/servers.yml
+```
+
+All repositories share one webhook endpoint, one secret and one run list:
+
+* Point every repository's webhook at the same `http://<host>:<port>/webhook`
+  with the same `WEBHOOK_SECRET`. Each delivery names its own repository, and
+  the server routes it to the matching manifest entry — its checkout, its config
+  file and its settings. A delivery for a repository the manifest does not list
+  is acknowledged and dropped (nothing fetched, nothing recorded, no status
+  posted), so an old hook cannot make the server build anything.
+* The dashboard at `/` keeps **one** list of runs covering every repository,
+  newest first, with a **Repository** column naming the one each run was for.
+  Reports at `/runs/<id>` and the **rerun** button work exactly as they do for a
+  single repository; a rerun goes back to the repository the run was for. A run
+  whose repository has since been removed from the manifest cannot be rerun —
+  there is no checkout left to build it from.
+* Commits are still tested **one at a time**, across all repositories together:
+  the point of the queue is that one host runs one pipeline at a time, and that
+  is no less true when the commits come from different repositories. A busy
+  repository therefore delays the others, bounded by each repository's job
+  timeout.
 
 ## Rerunning a failed run
 
@@ -635,6 +765,14 @@ config filename. `npx` will download whale-ci on first start; to avoid the
 network fetch (and pin a version) you can instead
 `sudo -u whaleci npm install -g whale-ci` and set
 `ExecStart=/usr/bin/whale-ci --serve ci.yml`.
+
+To serve [several repositories](#several-repositories---server-manifest) from
+this one unit, clone each of them under `/home/whaleci` in step 3, list them in
+a manifest readable by `whaleci`, and use
+`ExecStart=/usr/bin/npx whale-ci --server-manifest /etc/whale-ci/servers.yml`.
+The manifest names each checkout itself, so `WorkingDirectory` no longer
+matters, and `LISTEN_PORT`, `WORKTREE_ROOT` and `TRUSTED_PR_OWNERS` can come out
+of the environment file — keep the rest, which holds the secrets.
 
 ### 6. Enable and start the service
 

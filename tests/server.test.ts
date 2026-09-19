@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CiServer, type CiServerOptions, DEFAULT_JOB_TIMEOUT_MINUTES, type JobResult, rerunEvent, type RunJob, serverConfigFromEnv, verifyCheckout } from "../lib/server.ts";
+import { CiServer, type CiServerOptions, DEFAULT_JOB_TIMEOUT_MINUTES, type JobResult, rerunEvent, type RunJob, type ServerRepo, serverConfigFromEnv, serverSecretsFromEnv, verifyCheckout, verifyManifestRepo } from "../lib/server.ts";
 import { SESSION_COOKIE } from "../lib/auth.ts";
 import type { CommitState, StatusReporter } from "../lib/github.ts";
 import type { GitClient } from "../lib/git.ts";
@@ -16,6 +16,8 @@ const SECRET = "topsecret";
 /** Records the git operations a CI job performs, with optional injected faults. */
 class FakeGit implements GitClient {
   readonly calls: string[] = [];
+  /** The checkout directory each fetch/worktree op was given, in order. */
+  readonly dirs: string[] = [];
   fetchError: Error | undefined;
   /** Artificial duration of each git op, so concurrent ops would overlap. */
   opDelayMs = 0;
@@ -31,10 +33,12 @@ class FakeGit implements GitClient {
   async repoRoot(): Promise<string | undefined> {
     return this.#root;
   }
-  async fetch(_dir: string, ref: string): Promise<void> {
+  async fetch(dir: string, ref: string): Promise<void> {
+    this.dirs.push(dir);
     await this.#op(`fetch ${ref}`, this.fetchError);
   }
-  async addWorktree(_dir: string, path: string, commit: string): Promise<void> {
+  async addWorktree(dir: string, path: string, commit: string): Promise<void> {
+    this.dirs.push(dir);
     await this.#op(`add ${commit} ${path}`);
   }
   async removeWorktree(_dir: string, path: string): Promise<void> {
@@ -104,9 +108,9 @@ async function startServer(
     store,
     publicUrl,
     trustedPrOwners,
-    run: (dir, onReport, signal) => {
+    run: (dir, onReport, signal, repo) => {
       runDirs.push(dir);
-      return run(dir, onReport, signal);
+      return run(dir, onReport, signal, repo);
     },
     log: () => {},
     ...extra,
@@ -1453,4 +1457,380 @@ test("rerunEvent rebuilds the recorded commit, or refuses to", () => {
   store.finish(cli, "failure");
   assert.equal(rerunEvent(store.run(cli)!), undefined);
   store.close();
+});
+
+// --- serving several repositories from one server --------------------------
+
+/** One repository of a multi-repository server, with sensible test defaults. */
+function repo(overrides: Partial<ServerRepo> & { name: string }): ServerRepo {
+  return {
+    repoRoot: `/repos/${overrides.name}`,
+    configFile: "ci.yml",
+    fullName: `owner/${overrides.name}`,
+    ignoredBranches: new Set(),
+    trustedPrOwners: new Set(),
+    ...overrides,
+  };
+}
+
+interface MultiHarness extends Harness {
+  /** The repository each started job was given, in order. */
+  ranFor: ServerRepo[];
+  /** The worktree directory of each started job, in order. */
+  worktrees: string[];
+}
+
+/** Start a server over several repositories, recording which one ran what. */
+async function startRepos(
+  repositories: ServerRepo[],
+  run: RunJob = fixedRun(true),
+  extra: Partial<CiServerOptions> = {},
+): Promise<MultiHarness> {
+  const git = new FakeGit("/repo");
+  const status = new FakeStatus();
+  const store = new RunStore(":memory:");
+  const runDirs: string[] = [];
+  const ranFor: ServerRepo[] = [];
+  const server = new CiServer({
+    repositories,
+    secret: SECRET,
+    worktreeRoot: "/tmp/dockci-worktrees",
+    git,
+    status,
+    store,
+    run: (dir, onReport, signal, target) => {
+      runDirs.push(dir);
+      ranFor.push(target);
+      return run(dir, onReport, signal, target);
+    },
+    log: () => {},
+    ...extra,
+  });
+  await server.listen(0);
+  return { server, git, status, store, runDirs, ranFor, worktrees: runDirs };
+}
+
+/** A push payload for `owner/<name>` on `branch`. */
+function pushTo(name: string, branch = "main", after = "c0ffee1234567890") {
+  return {
+    ref: `refs/heads/${branch}`,
+    after,
+    repository: { full_name: `owner/${name}` },
+  };
+}
+
+test("a webhook is built from the checkout of the repository it names", async () => {
+  const h = await startRepos([
+    repo({ name: "alpha", configFile: "alpha.yml", maxConcurrency: 2 }),
+    repo({ name: "beta", configFile: "beta.yml" }),
+  ]);
+  try {
+    assert.equal((await postWebhook(h.server, "push", pushTo("beta"))).status, 202);
+    await h.server.drain();
+
+    // Fetched and checked out from beta's checkout, never alpha's.
+    assert.deepEqual(h.git.dirs, ["/repos/beta", "/repos/beta"]);
+    // And run with beta's own settings.
+    assert.equal(h.ranFor.length, 1);
+    assert.equal(h.ranFor[0]!.name, "beta");
+    assert.equal(h.ranFor[0]!.configFile, "beta.yml");
+    // The worktree name carries the repository, since two repositories can
+    // share a branch name and even a commit prefix.
+    assert.match(h.worktrees[0]!, /beta-main-c0ffee123456-\d+$/);
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("a webhook for an unserved repository leaves no run, status or git call", async () => {
+  const h = await startRepos([repo({ name: "alpha" })]);
+  try {
+    const response = await postWebhook(h.server, "push", pushTo("stranger"));
+    // Acknowledged, so GitHub does not mark the hook as failing, but dropped.
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /owner\/stranger" is not served/);
+    await h.server.drain();
+
+    assert.deepEqual(h.git.calls, []);
+    assert.deepEqual(h.status.states, []);
+    assert.deepEqual(h.store.recent(), []);
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("the repository is matched case-insensitively, as GitHub names are", async () => {
+  const h = await startRepos([repo({ name: "alpha", fullName: "Owner/Alpha" })]);
+  try {
+    const push = { ...pushTo("x"), repository: { full_name: "owner/alpha" } };
+    assert.equal((await postWebhook(h.server, "push", push)).status, 202);
+    await h.server.drain();
+    assert.equal(h.ranFor.length, 1);
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("each repository's ignored branches apply only to itself", async () => {
+  const h = await startRepos([
+    repo({ name: "alpha", ignoredBranches: new Set(["wip"]) }),
+    repo({ name: "beta" }),
+  ]);
+  try {
+    // Ignored for alpha, which listed it...
+    assert.equal(
+      (await postWebhook(h.server, "push", pushTo("alpha", "wip"))).status,
+      200,
+    );
+    // ...but built for beta, which did not.
+    assert.equal(
+      (await postWebhook(h.server, "push", pushTo("beta", "wip"))).status,
+      202,
+    );
+    await h.server.drain();
+
+    assert.deepEqual(h.ranFor.map((r) => r.name), ["beta"]);
+    assert.deepEqual(h.store.recent().map((r) => r.repo), ["owner/beta"]);
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("each repository's trusted owners apply only to itself", async () => {
+  const h = await startRepos([
+    repo({ name: "alpha", trustedPrOwners: new Set(["bob"]) }),
+    repo({ name: "beta" }),
+  ]);
+  const forkPr = (name: string) => ({
+    action: "synchronize",
+    repository: { full_name: `owner/${name}` },
+    pull_request: {
+      number: 7,
+      head: {
+        ref: "fork-feature",
+        sha: "f0rkc0mm1t",
+        repo: { full_name: "bob/fork", owner: { login: "bob" } },
+      },
+    },
+  });
+  try {
+    // bob is trusted for alpha only.
+    assert.equal(
+      (await postWebhook(h.server, "pull_request", forkPr("alpha"))).status,
+      202,
+    );
+    const refused = await postWebhook(h.server, "pull_request", forkPr("beta"));
+    assert.equal(refused.status, 200);
+    assert.match(await refused.text(), /not in TRUSTED_PR_OWNERS/);
+    await h.server.drain();
+
+    assert.deepEqual(h.ranFor.map((r) => r.name), ["alpha"]);
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("a repository can override the server-wide job timeout", async () => {
+  const delays: number[] = [];
+  const h = await startRepos(
+    [repo({ name: "alpha", jobTimeoutMinutes: 5 }), repo({ name: "beta" })],
+    fixedRun(true),
+    {
+      jobTimeoutMinutes: 45,
+      timer: (ms) => {
+        delays.push(ms);
+        return () => {};
+      },
+    },
+  );
+  try {
+    await postWebhook(h.server, "push", pushTo("alpha"));
+    await h.server.drain();
+    await postWebhook(h.server, "push", pushTo("beta"));
+    await h.server.drain();
+    // alpha's own 5 minutes, then the server-wide 45 for beta.
+    assert.deepEqual(delays, [5 * 60_000, 45 * 60_000]);
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("one run list covers every repository, and says which each run was for", async () => {
+  const h = await startRepos([repo({ name: "alpha" }), repo({ name: "beta" })]);
+  try {
+    await postWebhook(h.server, "push", pushTo("alpha", "main", "aaaaaaaaaaaa1"));
+    await h.server.drain();
+    await postWebhook(h.server, "push", pushTo("beta", "main", "bbbbbbbbbbbb2"));
+    await h.server.drain();
+
+    const page = await (await fetch(`http://127.0.0.1:${h.server.port}/`)).text();
+    assert.match(page, /<th>Repository<\/th>/);
+    assert.match(page, /owner\/alpha/);
+    assert.match(page, /owner\/beta/);
+    // Newest first, in one list.
+    assert.ok(page.indexOf("owner/beta") < page.indexOf("owner/alpha"));
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("a single-repository dashboard has no repository column", async () => {
+  const h = await startServer(fixedRun(true));
+  try {
+    await postWebhook(h.server, "push", PUSH);
+    await h.server.drain();
+    const page = await (await fetch(`http://127.0.0.1:${h.server.port}/`)).text();
+    assert.doesNotMatch(page, /<th>Repository<\/th>/);
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("a rerun is routed back to its own repository's checkout", async () => {
+  const h = await startRepos(
+    [repo({ name: "alpha" }), repo({ name: "beta" })],
+    fixedRun(false),
+    { auth: ADMIN },
+  );
+  try {
+    await postWebhook(h.server, "push", pushTo("beta"));
+    await h.server.drain();
+    h.git.dirs.length = 0;
+
+    const cookie = await session(h.server);
+    const id = h.store.recent()[0]!.id;
+    assert.equal((await postRerun(h.server, id, cookie)).status, 303);
+    await h.server.drain();
+
+    assert.deepEqual(h.git.dirs, ["/repos/beta", "/repos/beta"]);
+    assert.deepEqual(h.ranFor.map((r) => r.name), ["beta", "beta"]);
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("a run of a repository that is no longer served cannot be rerun", async () => {
+  const h = await startRepos([repo({ name: "alpha" })], fixedRun(true), {
+    auth: ADMIN,
+  });
+  try {
+    // A failed run recorded for a repository this server does not serve, as a
+    // history written under an earlier manifest would hold.
+    const id = h.store.queue({
+      branch: "main",
+      commit: "deadbeef",
+      repo: "owner/gone",
+      fetchRef: "main",
+    });
+    h.store.finish(id, "failure");
+
+    const cookie = await session(h.server);
+    const response = await postRerun(h.server, id, cookie);
+    assert.equal(response.status, 409);
+    assert.match(await response.text(), /"owner\/gone" is no longer served/);
+    await h.server.drain();
+    assert.deepEqual(h.ranFor, []);
+    assert.deepEqual(h.git.calls, []);
+  } finally {
+    await h.server.close();
+    h.store.close();
+  }
+});
+
+test("a server must be given a repository to serve", () => {
+  const base = {
+    secret: SECRET,
+    worktreeRoot: "/tmp/wt",
+    git: new FakeGit("/repo"),
+    status: new FakeStatus(),
+    store: new RunStore(":memory:"),
+    log: () => {},
+  };
+  assert.throws(() => new CiServer({ ...base }), ConfigError);
+  assert.throws(() => new CiServer({ ...base, repositories: [] }), ConfigError);
+  // repoRoot without configFile is not enough either.
+  assert.throws(() => new CiServer({ ...base, repoRoot: "/repo" }), ConfigError);
+});
+
+test("serverSecretsFromEnv reads the credentials both server modes need", () => {
+  assert.deepEqual(
+    serverSecretsFromEnv({ GITHUB_TOKEN: "tok", WEBHOOK_SECRET: "sec" }),
+    {
+      githubToken: "tok",
+      webhookSecret: "sec",
+      publicUrl: undefined,
+      auth: { username: "admin", password: undefined },
+    },
+  );
+  const full = serverSecretsFromEnv({
+    GITHUB_TOKEN: "tok",
+    WEBHOOK_SECRET: "sec",
+    PUBLIC_URL: " https://ci.example.com ",
+    ADMIN_USERNAME: "ci",
+    ADMIN_PASSWORD: "hunter2",
+  });
+  assert.equal(full.publicUrl, "https://ci.example.com");
+  assert.deepEqual(full.auth, { username: "ci", password: "hunter2" });
+  // Neither the worktree root nor the port is read here: a manifest supplies them.
+  assert.throws(
+    () => serverSecretsFromEnv({ WEBHOOK_SECRET: "sec" }),
+    (err: unknown) =>
+      err instanceof ConfigError && /GITHUB_TOKEN/.test(err.message),
+  );
+});
+
+test("verifyManifestRepo checks each repository's checkout and config", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "whale-repo-"));
+  writeFileSync(join(dir, "ci.yml"), "build:\n  image: alpine\n");
+
+  assert.equal(
+    await verifyManifestRepo(new FakeGit(dir), {
+      name: "alpha",
+      path: dir,
+      configFile: "ci.yml",
+    }),
+    dir,
+  );
+
+  // Not a checkout at all.
+  await assert.rejects(
+    verifyManifestRepo(new FakeGit(undefined), {
+      name: "alpha",
+      path: dir,
+      configFile: "ci.yml",
+    }),
+    (err: unknown) =>
+      err instanceof ConfigError && /is not a git checkout/.test(err.message),
+  );
+  // A checkout, but the path names a subdirectory of one.
+  await assert.rejects(
+    verifyManifestRepo(new FakeGit(tmpdir()), {
+      name: "alpha",
+      path: dir,
+      configFile: "ci.yml",
+    }),
+    (err: unknown) =>
+      err instanceof ConfigError &&
+      /is not the root of its git checkout/.test(err.message),
+  );
+  // The config file the repository names has to be there.
+  await assert.rejects(
+    verifyManifestRepo(new FakeGit(dir), {
+      name: "alpha",
+      path: dir,
+      configFile: "missing.yml",
+    }),
+    (err: unknown) =>
+      err instanceof ConfigError &&
+      /config file "missing.yml" not found/.test(err.message),
+  );
 });

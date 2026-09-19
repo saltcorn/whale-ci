@@ -83,6 +83,7 @@ export {
   parsePushEvent,
   parseTrustedOwners,
   pullRequestRef,
+  repositoryFullName,
   statusUrl,
   verifySignature,
 } from "./github.ts";
@@ -96,9 +97,26 @@ export {
   CiServer,
   rerunEvent,
   serverConfigFromEnv,
+  serverSecretsFromEnv,
   verifyCheckout,
+  verifyManifestRepo,
 } from "./server.ts";
-export type { CiServerOptions, JobResult, RunJob, ServerEnv } from "./server.ts";
+export type {
+  CiServerOptions,
+  JobResult,
+  RunJob,
+  ServerEnv,
+  ServerRepo,
+  ServerSecrets,
+} from "./server.ts";
+export {
+  DEFAULT_CONFIG_FILE,
+  DEFAULT_MAX_CONCURRENCY,
+  loadManifest,
+  parseManifest,
+  repoFullName,
+} from "./manifest.ts";
+export type { ManifestRepo, ServerManifest } from "./manifest.ts";
 export { runShell, type ShellResult } from "./proc.ts";
 export {
   type Config,

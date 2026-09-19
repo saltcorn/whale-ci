@@ -86,6 +86,18 @@ function nested(object: unknown, name: string): unknown {
 }
 
 /**
+ * The `owner/repo` of the repository a webhook payload is about, taken from its
+ * `repository.full_name`, or undefined when the payload has none. For a pull
+ * request this is the *base* repository — the one the server serves — not the
+ * fork the commit came from, which is what makes it the right key for deciding
+ * which served repository a webhook belongs to.
+ */
+export function repositoryFullName(payload: unknown): string | undefined {
+  if (typeof payload !== "object" || payload === null) return undefined;
+  return text((payload as Record<string, unknown>)["repository"], "full_name");
+}
+
+/**
  * Extract the CI-relevant fields from a parsed `push` webhook payload, or
  * `undefined` when the push should be ignored: a branch deletion, a tag (or any
  * non-branch ref), or a payload missing the fields we need.

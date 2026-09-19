@@ -13,6 +13,27 @@ async function parseArgs(args: string[]) {
   return (result as Extract<typeof result, { _tag: "ok" }>).value;
 }
 
+/**
+ * Parse `args` and run the command's handler, returning the exit code it
+ * resolves with together with whatever it wrote to stderr. Used for the
+ * argument combinations the handler rejects rather than the parser.
+ */
+async function handle(
+  args: string[],
+): Promise<{ code: number; stderr: string }> {
+  const value = await parseArgs(args);
+  const original = console.error;
+  let stderr = "";
+  console.error = (...parts: unknown[]) => {
+    stderr += parts.join(" ") + "\n";
+  };
+  try {
+    return { code: await app.handler(value), stderr };
+  } finally {
+    console.error = original;
+  }
+}
+
 /** The concatenated error messages from a failed parse of `args`. */
 async function parseError(args: string[]): Promise<string> {
   const result = await parse(app, args);
@@ -31,6 +52,7 @@ test("parses a lone config file", async () => {
     maxConcurrency: 4,
     jobTimeout: 30,
     ignoreBranches: undefined,
+    serverManifest: undefined,
     step: undefined,
   });
 });
@@ -134,11 +156,55 @@ test("output flag and config can appear in any order", async () => {
 });
 
 test("a missing config file is an error", async () => {
-  assert.match(await parseError([]), /config\.yml/);
+  const { code, stderr } = await handle([]);
+  assert.equal(code, 1);
+  assert.match(stderr, /config file is required/);
 });
 
-test("a missing output value is an error", async () => {
-  assert.notEqual((await parse(app, ["-o"]))._tag, "ok");
+test("parses --server-manifest, which is unset by default", async () => {
+  assert.equal((await parseArgs(["ci.yml"])).serverManifest, undefined);
+  assert.equal(
+    (await parseArgs(["--server-manifest", "servers.yml"])).serverManifest,
+    "servers.yml",
+  );
+  assert.equal(
+    (await parseArgs(["--server-manifest=servers.yml"])).serverManifest,
+    "servers.yml",
+  );
+});
+
+test("--server-manifest needs no config file", async () => {
+  const parsed = await parseArgs(["--server-manifest", "servers.yml"]);
+  assert.equal(parsed.configFile, undefined);
+  assert.equal(parsed.step, undefined);
+});
+
+test("--server-manifest rejects the single-repository options", async () => {
+  const rejected: Array<[string[], RegExp]> = [
+    [["--serve"], /cannot be combined with --serve/],
+    [["ci.yml"], /config file cannot be combined/],
+    [["ci.yml", "test"], /config file cannot be combined/],
+    [["--dump-yaml"], /--dump-yaml cannot be combined/],
+    [["-o", "r.html"], /--output cannot be combined/],
+    [["--ignore-branch", "wip"], /--ignore-branch cannot be combined/],
+  ];
+  for (const [args, message] of rejected) {
+    const { code, stderr } = await handle([
+      "--server-manifest",
+      "servers.yml",
+      ...args,
+    ]);
+    assert.equal(code, 1, `expected ${JSON.stringify(args)} to be rejected`);
+    assert.match(stderr, message);
+  }
+});
+
+test("a missing output value leaves no config file to run", async () => {
+  // cmd-ts lets a dangling `-o` swallow its own value; with nothing left to
+  // build, the handler rejects the invocation.
+  const { code, stderr } = await handle(["-o"]);
+  assert.equal(code, 1);
+  assert.match(stderr, /config file is required/);
 });
 
 test("an unknown option is an error", async () => {

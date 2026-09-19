@@ -15,6 +15,7 @@ import {
   string,
 } from "cmd-ts";
 import { loadConfig, restrictToStep } from "../lib/config.ts";
+import { loadManifest } from "../lib/manifest.ts";
 import { dumpEvaluatedConfig } from "../lib/dump.ts";
 import { CliGitClient } from "../lib/git.ts";
 import {
@@ -28,8 +29,11 @@ import { runPipeline } from "../lib/runner.ts";
 import {
   CiServer,
   DEFAULT_JOB_TIMEOUT_MINUTES,
+  type ServerRepo,
   serverConfigFromEnv,
+  serverSecretsFromEnv,
   verifyCheckout,
+  verifyManifestRepo,
 } from "../lib/server.ts";
 import { ConfigError } from "../lib/types.ts";
 
@@ -103,6 +107,20 @@ export const app = command({
         "branches is neither built nor recorded, so it never appears in the " +
         "run list and no commit status is posted for it.",
     }),
+    serverManifest: option({
+      type: optional(string),
+      long: "server-manifest",
+      description:
+        "Run as a CI server for several repositories at once, configured by " +
+        "this YAML manifest: global settings (port, worktree root, max " +
+        "concurrency, job timeout) and a list of repositories, each with a " +
+        "name, a checkout path, a URL and its own ignore-branch and " +
+        "trusted-owners lists. There is no single config file in this mode — " +
+        "each repository names its own — and all repositories share one run " +
+        "list on the dashboard. Reads GITHUB_TOKEN, WEBHOOK_SECRET and the " +
+        "optional PUBLIC_URL, ADMIN_USERNAME and ADMIN_PASSWORD from the " +
+        "environment.",
+    }),
     serve: flag({
       long: "serve",
       description:
@@ -115,9 +133,11 @@ export const app = command({
         "dashboard.",
     }),
     configFile: positional({
-      type: string,
+      type: optional(string),
       displayName: "config.yml",
-      description: "Path to the YAML pipeline configuration file.",
+      description:
+        "Path to the YAML pipeline configuration file. Required except with " +
+        "--server-manifest, where each repository names its own.",
     }),
     step: positional({
       type: optional(string),
@@ -131,6 +151,7 @@ export const app = command({
     {
       output,
       serve,
+      serverManifest,
       dumpYaml,
       configFile,
       step,
@@ -139,13 +160,49 @@ export const app = command({
       ignoreBranches,
     },
   ) => {
-    if (serve && step !== undefined) {
-      console.error("Error: a step name cannot be combined with --serve");
+    const fail = (message: string): Promise<number> => {
+      console.error(`Error: ${message}`);
       return Promise.resolve(1);
+    };
+    if (serverManifest !== undefined) {
+      // The manifest is the whole configuration of a multi-repository server:
+      // anything that only makes sense for one repository — a config file, a
+      // step, a report path — would have to be silently ignored, so it is
+      // rejected instead. The per-repository equivalents live in the manifest.
+      if (serve) {
+        return fail("--server-manifest cannot be combined with --serve");
+      }
+      if (configFile !== undefined) {
+        return fail(
+          "a config file cannot be combined with --server-manifest: each " +
+            "repository in the manifest names its own",
+        );
+      }
+      if (step !== undefined) {
+        return fail("a step name cannot be combined with --server-manifest");
+      }
+      if (dumpYaml) {
+        return fail("--dump-yaml cannot be combined with --server-manifest");
+      }
+      if (output !== undefined) {
+        return fail("--output cannot be combined with --server-manifest");
+      }
+      if (ignoreBranches !== undefined) {
+        return fail(
+          "--ignore-branch cannot be combined with --server-manifest: set " +
+            "ignore-branch per repository in the manifest",
+        );
+      }
+      return runServeManifest(serverManifest);
+    }
+    if (configFile === undefined) {
+      return fail("a config file is required (or use --server-manifest)");
+    }
+    if (serve && step !== undefined) {
+      return fail("a step name cannot be combined with --serve");
     }
     if (dumpYaml && serve) {
-      console.error("Error: --dump-yaml cannot be combined with --serve");
-      return Promise.resolve(1);
+      return fail("--dump-yaml cannot be combined with --serve");
     }
     if (dumpYaml) {
       return runDumpYaml(configFile);
@@ -327,15 +384,7 @@ async function runServe(
       );
     }
 
-    // Run until Ctrl-C, then stop listening and let the running job finish.
-    await new Promise<void>((resolvePromise) => {
-      const onSigint = (): void => {
-        console.error("\nShutting down; waiting for the in-flight CI job...");
-        process.removeListener("SIGINT", onSigint);
-        void server.close().then(resolvePromise);
-      };
-      process.on("SIGINT", onSigint);
-    });
+    await serveUntilInterrupted(server);
     store.close();
     return 0;
   } catch (err) {
@@ -345,6 +394,107 @@ async function runServe(
     }
     throw err;
   }
+}
+
+/**
+ * Run as a CI server for every repository listed in a server manifest. The
+ * manifest supplies the port, the worktree root and each repository's checkout,
+ * config file and settings; the credentials still come from the environment, so
+ * a manifest can live next to the checkouts it names without holding secrets.
+ * Every repository's checkout is verified before the socket is opened, so a
+ * mistyped path fails at startup rather than on the first webhook for it. All
+ * repositories share one webhook endpoint — they are told apart by the
+ * `owner/repo` in each delivery — and one run list on the dashboard. Serves
+ * until interrupted (Ctrl-C), letting the CI job in flight finish. Returns the
+ * process exit code.
+ */
+async function runServeManifest(manifestFile: string): Promise<number> {
+  try {
+    const manifest = await loadManifest(manifestFile);
+    const secrets = serverSecretsFromEnv(process.env);
+    const git = new CliGitClient();
+
+    const repositories: ServerRepo[] = [];
+    for (const repo of manifest.repositories) {
+      repositories.push({
+        name: repo.name,
+        repoRoot: await verifyManifestRepo(git, repo),
+        configFile: repo.configFile,
+        fullName: repo.fullName,
+        ignoredBranches: repo.ignoredBranches,
+        trustedPrOwners: repo.trustedPrOwners,
+        maxConcurrency: repo.maxConcurrency,
+        jobTimeoutMinutes: repo.jobTimeoutMinutes,
+      });
+    }
+
+    // The worktree root must exist before git can add worktrees under it.
+    await mkdir(manifest.worktreeRoot, { recursive: true });
+
+    const store = new RunStore();
+    // PUBLIC_URL still works, but the manifest wins when it sets one: it is the
+    // file that describes this server.
+    const publicUrl = manifest.publicUrl ?? secrets.publicUrl;
+    const server = new CiServer({
+      repositories,
+      secret: secrets.webhookSecret,
+      worktreeRoot: manifest.worktreeRoot,
+      git,
+      status: new GitHubStatusReporter(secrets.githubToken),
+      store,
+      publicUrl,
+      auth: secrets.auth,
+    });
+
+    await server.listen(manifest.port);
+    console.error(
+      `whale-ci serving webhooks for ${repositories.length} repositories on ` +
+        `port ${manifest.port} (dashboard at ${
+          publicUrl ?? `http://localhost:${manifest.port}`
+        }/, worktrees under ${manifest.worktreeRoot}, one commit at a time)`,
+    );
+    for (const repo of repositories) {
+      const ignored = repo.ignoredBranches.size > 0
+        ? `, ignoring ${[...repo.ignoredBranches].join(", ")}`
+        : "";
+      console.error(
+        `  ${repo.name}: ${repo.fullName} -> ${repo.repoRoot} ` +
+          `(${repo.configFile}, ${repo.jobTimeoutMinutes} minute job timeout${ignored})`,
+      );
+    }
+    if (secrets.auth.password === undefined) {
+      console.error(
+        "ADMIN_PASSWORD is not set: /login always fails and the dashboard is " +
+          "read-only (no rerun buttons)",
+      );
+    }
+
+    await serveUntilInterrupted(server);
+    store.close();
+    return 0;
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Resolve when the server has been stopped by Ctrl-C: it stops listening and
+ * the CI job in flight is allowed to finish (commits still queued are dropped
+ * and reported, so no check sits pending forever).
+ */
+function serveUntilInterrupted(server: CiServer): Promise<void> {
+  return new Promise<void>((resolvePromise) => {
+    const onSigint = (): void => {
+      console.error("\nShutting down; waiting for the in-flight CI job...");
+      process.removeListener("SIGINT", onSigint);
+      void server.close().then(resolvePromise);
+    };
+    process.on("SIGINT", onSigint);
+  });
 }
 
 /**

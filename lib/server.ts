@@ -21,6 +21,7 @@ import {
   decidePullRequest,
   parsePushEvent,
   parseTrustedOwners,
+  repositoryFullName,
   type StatusReporter,
   verifySignature,
 } from "./github.ts";
@@ -29,26 +30,22 @@ import { renderDashboard, renderReport, type StepReport } from "./report.ts";
 import { runPipeline } from "./runner.ts";
 import { ConfigError } from "./types.ts";
 
-/** The configuration read from the environment when starting the server. */
-export interface ServerEnv {
+/**
+ * The settings that only ever come from the environment, never from a file:
+ * the credentials the server runs with, plus the public URL its reports are
+ * reachable at. A server manifest deliberately carries none of these, so it can
+ * be checked in next to the repositories it lists.
+ */
+export interface ServerSecrets {
   /** Token used to post commit statuses back to GitHub. */
   githubToken: string;
   /** Shared secret used to verify webhook signatures. */
   webhookSecret: string;
-  /** Directory under which per-run git worktrees are created. */
-  worktreeRoot: string;
-  /** TCP port the webhook server listens on. */
-  listenPort: number;
   /**
    * Externally-reachable base URL of the dashboard, used to link commit
    * statuses to their run reports. Undefined when `PUBLIC_URL` is unset.
    */
   publicUrl?: string;
-  /**
-   * GitHub account logins whose fork pull requests are built, from
-   * `TRUSTED_PR_OWNERS`. Empty when unset, which builds no fork pull request.
-   */
-  trustedPrOwners: ReadonlySet<string>;
   /**
    * The operator account accepted at `/login`, from `ADMIN_USERNAME` (default
    * `admin`) and `ADMIN_PASSWORD`. With no password set the login always fails
@@ -57,45 +54,38 @@ export interface ServerEnv {
   auth: AuthConfig;
 }
 
+/** The configuration read from the environment when starting the server. */
+export interface ServerEnv extends ServerSecrets {
+  /** Directory under which per-run git worktrees are created. */
+  worktreeRoot: string;
+  /** TCP port the webhook server listens on. */
+  listenPort: number;
+  /**
+   * GitHub account logins whose fork pull requests are built, from
+   * `TRUSTED_PR_OWNERS`. Empty when unset, which builds no fork pull request.
+   */
+  trustedPrOwners: ReadonlySet<string>;
+}
+
 /**
- * Read and validate the server's settings from environment variables
- * (`GITHUB_TOKEN`, `WEBHOOK_SECRET`, `WORKTREE_ROOT`, `LISTEN_PORT`). Throws a
- * {@link ConfigError} naming the first missing or invalid variable.
+ * Read and validate the credentials the server runs with from the environment
+ * (`GITHUB_TOKEN`, `WEBHOOK_SECRET`, and the optional `PUBLIC_URL`,
+ * `ADMIN_USERNAME` and `ADMIN_PASSWORD`). This is the part of the configuration
+ * shared by both modes: serving one repository from `--serve`, and serving a
+ * whole list of them from `--server-manifest`. Throws a {@link ConfigError}
+ * naming the first missing or invalid variable.
  */
-export function serverConfigFromEnv(
+export function serverSecretsFromEnv(
   env: Record<string, string | undefined>,
-): ServerEnv {
-  const required = (name: string): string => {
-    const value = env[name];
-    if (value === undefined || value.trim() === "") {
-      throw new ConfigError(`Missing required environment variable ${name}`);
-    }
-    return value;
-  };
-
-  const githubToken = required("GITHUB_TOKEN");
-  const webhookSecret = required("WEBHOOK_SECRET");
-  const worktreeRoot = required("WORKTREE_ROOT");
-
-  const portText = required("LISTEN_PORT");
-  const listenPort = Number(portText);
-  if (
-    !Number.isInteger(listenPort) || listenPort <= 0 || listenPort > 65535
-  ) {
-    throw new ConfigError(
-      `LISTEN_PORT must be a port number between 1 and 65535, got "${portText}"`,
-    );
-  }
+): ServerSecrets {
+  const githubToken = requiredEnv(env, "GITHUB_TOKEN");
+  const webhookSecret = requiredEnv(env, "WEBHOOK_SECRET");
 
   // Optional: when set, commit statuses link back to the run's dashboard page.
   const publicUrlRaw = env["PUBLIC_URL"];
   const publicUrl = publicUrlRaw !== undefined && publicUrlRaw.trim() !== ""
     ? publicUrlRaw.trim()
     : undefined;
-
-  // Optional, and empty by default: a fork pull request runs its author's code
-  // on this host, so none is built until an owner is named here.
-  const trustedPrOwners = parseTrustedOwners(env["TRUSTED_PR_OWNERS"]);
 
   // The dashboard's operator login. The username has a default; the password
   // deliberately has none, so a server that was never given one cannot be
@@ -111,15 +101,52 @@ export function serverConfigFromEnv(
       : undefined,
   };
 
-  return {
-    githubToken,
-    webhookSecret,
-    worktreeRoot,
-    listenPort,
-    publicUrl,
-    trustedPrOwners,
-    auth,
-  };
+  return { githubToken, webhookSecret, publicUrl, auth };
+}
+
+/** A required environment variable, or a {@link ConfigError} naming it. */
+function requiredEnv(
+  env: Record<string, string | undefined>,
+  name: string,
+): string {
+  const value = env[name];
+  if (value === undefined || value.trim() === "") {
+    throw new ConfigError(`Missing required environment variable ${name}`);
+  }
+  return value;
+}
+
+/**
+ * Read and validate the settings of a single-repository (`--serve`) server from
+ * environment variables (`GITHUB_TOKEN`, `WEBHOOK_SECRET`, `WORKTREE_ROOT`,
+ * `LISTEN_PORT`). Throws a {@link ConfigError} naming the first missing or
+ * invalid variable. A `--server-manifest` server takes the worktree root, the
+ * port and the trusted owners from its manifest instead, and reads only
+ * {@link serverSecretsFromEnv} here.
+ */
+export function serverConfigFromEnv(
+  env: Record<string, string | undefined>,
+): ServerEnv {
+  const required = (name: string): string => requiredEnv(env, name);
+
+  const secrets = serverSecretsFromEnv(env);
+  const worktreeRoot = required("WORKTREE_ROOT");
+
+  const portText = required("LISTEN_PORT");
+  const listenPort = Number(portText);
+  if (
+    !Number.isInteger(listenPort) || listenPort <= 0 || listenPort > 65535
+  ) {
+    throw new ConfigError(
+      `LISTEN_PORT must be a port number between 1 and 65535, got "${portText}"`,
+    );
+  }
+
+  // Optional, and empty by default: a fork pull request runs its author's code
+  // on this host, so none is built until an owner is named here.
+  const trustedPrOwners = parseTrustedOwners(env["TRUSTED_PR_OWNERS"]);
+
+  return { ...secrets, worktreeRoot, listenPort, trustedPrOwners };
 }
 
 /**
@@ -150,6 +177,39 @@ export async function verifyCheckout(
   return root;
 }
 
+/**
+ * Verify that one repository of a server manifest can actually be served:
+ * `path` must be the root of a git checkout containing `configFile`. Returns
+ * the resolved checkout root, which is what worktrees are created from. Unlike
+ * {@link verifyCheckout} the directory is named in the manifest rather than
+ * being the process's own, so the errors name the repository the operator
+ * wrote.
+ */
+export async function verifyManifestRepo(
+  git: GitClient,
+  repo: { name: string; path: string; configFile: string },
+): Promise<string> {
+  const root = await git.repoRoot(repo.path);
+  if (root === undefined) {
+    throw new ConfigError(
+      `Repository "${repo.name}": ${repo.path} is not a git checkout`,
+    );
+  }
+  if (realpathSync(root) !== realpathSync(repo.path)) {
+    throw new ConfigError(
+      `Repository "${repo.name}": ${repo.path} is not the root of its git ` +
+        `checkout (its root is ${root})`,
+    );
+  }
+  if (!existsSync(resolve(root, repo.configFile))) {
+    throw new ConfigError(
+      `Repository "${repo.name}": config file "${repo.configFile}" not found ` +
+        `in ${root}`,
+    );
+  }
+  return root;
+}
+
 /** Outcome of one CI job: whether it passed, plus its HTML report. */
 export interface JobResult {
   ok: boolean;
@@ -173,13 +233,65 @@ export type RunJob = (
   worktreeDir: string,
   onReport: (report: string) => void,
   signal: AbortSignal,
+  /** The repository the worktree was checked out from. */
+  repo: ServerRepo,
 ) => Promise<JobResult>;
 
-export interface CiServerOptions {
-  /** Root of the git checkout to create worktrees from. */
+/**
+ * One repository a {@link CiServer} builds. A server started from a server
+ * manifest has one of these per entry in the manifest; a single-repository
+ * server (`--serve`) has exactly one, built from its own checkout.
+ */
+export interface ServerRepo {
+  /** Display name, shown on the dashboard and in the server's log. */
+  name: string;
+  /** Root of the git checkout worktrees for this repository are created from. */
   repoRoot: string;
-  /** Config file name, resolved inside each worktree. */
+  /** Pipeline config file, resolved inside each worktree of this repository. */
   configFile: string;
+  /**
+   * The `owner/repo` an arriving webhook's `repository.full_name` must equal
+   * (case-insensitively) for the commit to be built as this repository. When
+   * undefined the repository matches every webhook, which is how a
+   * single-repository server behaves: it serves one checkout and builds
+   * whatever that checkout's webhook sends.
+   */
+  fullName?: string;
+  /** Branches whose webhooks are dropped without being built or recorded. */
+  ignoredBranches: ReadonlySet<string>;
+  /** GitHub logins whose fork pull requests are built for this repository. */
+  trustedPrOwners: ReadonlySet<string>;
+  /**
+   * Test containers this repository's pipeline may run in parallel. Undefined
+   * leaves the runner's own default in place.
+   */
+  maxConcurrency?: number;
+  /**
+   * Minutes one commit of this repository may build before it is aborted.
+   * Undefined uses the server-wide timeout.
+   */
+  jobTimeoutMinutes?: number;
+}
+
+export interface CiServerOptions {
+  /**
+   * The repositories this server builds, each routed to by the `owner/repo` in
+   * its {@link ServerRepo.fullName}. This is how a server started from a server
+   * manifest is configured; a single-repository server sets `repoRoot` and
+   * `configFile` instead, which is equivalent to one entry that matches every
+   * webhook.
+   */
+  repositories?: readonly ServerRepo[];
+  /**
+   * Root of the git checkout to create worktrees from. Required unless
+   * `repositories` is given.
+   */
+  repoRoot?: string;
+  /**
+   * Config file name, resolved inside each worktree. Required unless
+   * `repositories` is given.
+   */
+  configFile?: string;
   /** Shared secret for verifying webhook signatures. */
   secret: string;
   /** Directory under which per-run worktrees are created. */
@@ -204,6 +316,13 @@ export interface CiServerOptions {
    * access to the repository.
    */
   trustedPrOwners?: ReadonlySet<string>;
+  /**
+   * Test containers one pipeline may run in parallel, for repositories that do
+   * not set their own. Undefined leaves the runner's default in place. Since
+   * commits are tested one at a time this bounds the whole host, not just one
+   * repository.
+   */
+  maxConcurrency?: number;
   /**
    * Branch names whose webhooks are dropped without being built or recorded,
    * from `--ignore-branch`. A push to one of these branches (or a pull request
@@ -263,19 +382,26 @@ export interface CiServerOptions {
 interface QueuedRun {
   event: CiEvent;
   runId: number;
+  /** The repository the commit belongs to, and whose settings build it. */
+  repo: ServerRepo;
 }
 
 export class CiServer {
-  readonly #repoRoot: string;
-  readonly #configFile: string;
+  /** The repositories served, in the order they were configured. */
+  readonly #repos: readonly ServerRepo[];
+  /** Repositories by lower-cased `owner/repo`, for routing webhooks. */
+  readonly #byFullName: Map<string, ServerRepo>;
+  /**
+   * The repository that builds any webhook, when this server serves a single
+   * checkout and so does not route by repository at all.
+   */
+  readonly #catchAll: ServerRepo | undefined;
   readonly #secret: string;
   readonly #worktreeRoot: string;
   readonly #git: GitClient;
   readonly #status: StatusReporter;
   readonly #store: RunHistory;
   readonly #publicUrl?: string;
-  readonly #trustedPrOwners: ReadonlySet<string>;
-  readonly #ignoredBranches: ReadonlySet<string>;
   readonly #auth: AuthConfig;
   /**
    * Key session cookies are encrypted with, derived from the configured
@@ -303,9 +429,43 @@ export class CiServer {
   /** Monotonic counter making each worktree directory name unique. */
   #counter = 0;
 
+  /**
+   * The repositories to serve, from either form of the options: the explicit
+   * `repositories` list, or the single checkout named by `repoRoot` and
+   * `configFile`. The single checkout becomes one repository with no
+   * `fullName`, so it builds every webhook that arrives — the behaviour a
+   * one-repository server has always had.
+   */
+  static #repositories(options: CiServerOptions): readonly ServerRepo[] {
+    if (options.repositories !== undefined) {
+      if (options.repositories.length === 0) {
+        throw new ConfigError("A CI server must serve at least one repository");
+      }
+      return options.repositories;
+    }
+    if (options.repoRoot === undefined || options.configFile === undefined) {
+      throw new ConfigError(
+        "A CI server needs either a list of repositories or a repoRoot and configFile",
+      );
+    }
+    return [{
+      name: options.repoRoot,
+      repoRoot: options.repoRoot,
+      configFile: options.configFile,
+      ignoredBranches: options.ignoredBranches ?? new Set(),
+      trustedPrOwners: options.trustedPrOwners ?? new Set(),
+      maxConcurrency: options.maxConcurrency,
+    }];
+  }
+
   constructor(options: CiServerOptions) {
-    this.#repoRoot = options.repoRoot;
-    this.#configFile = options.configFile;
+    this.#repos = CiServer.#repositories(options);
+    this.#byFullName = new Map(
+      this.#repos
+        .filter((repo) => repo.fullName !== undefined)
+        .map((repo) => [repo.fullName!.toLowerCase(), repo]),
+    );
+    this.#catchAll = this.#repos.find((repo) => repo.fullName === undefined);
     this.#secret = options.secret;
     this.#worktreeRoot = options.worktreeRoot;
     this.#git = options.git;
@@ -313,8 +473,6 @@ export class CiServer {
     this.#store = options.store;
     // Normalise away a trailing slash so `${publicUrl}/runs/<id>` is well-formed.
     this.#publicUrl = options.publicUrl?.replace(/\/+$/, "");
-    this.#trustedPrOwners = options.trustedPrOwners ?? new Set();
-    this.#ignoredBranches = options.ignoredBranches ?? new Set();
     this.#auth = options.auth ?? { username: DEFAULT_ADMIN_USERNAME };
     this.#sessionKey = this.#auth.password === undefined ||
         this.#auth.password === ""
@@ -336,12 +494,13 @@ export class CiServer {
     if (orphaned > 0) {
       this.#log(`Marked ${orphaned} orphaned job(s) as errored`);
     }
-    this.#run = options.run ?? (async (dir, onReport, signal) => {
-      const config = await loadConfig(resolve(dir, this.#configFile));
+    this.#run = options.run ?? (async (dir, onReport, signal, repo) => {
+      const config = await loadConfig(resolve(dir, repo.configFile));
       const render = (steps: StepReport[], ok: boolean): string =>
-        renderReport(steps, { ok, configFile: this.#configFile });
+        renderReport(steps, { ok, configFile: repo.configFile });
       const result = await runPipeline(config, {
         captureOutput: true,
+        maxConcurrency: repo.maxConcurrency,
         // On a timeout the pipeline stops every container and tears the network
         // down before resolving, so the next queued commit starts on a clean host.
         signal,
@@ -435,6 +594,10 @@ export class CiServer {
         renderDashboard(this.#store.recent(), {
           user: this.#session(req),
           loginEnabled: this.#sessionKey !== undefined,
+          // One list of runs covers every repository, so say which repository
+          // each run was for — but only when there is more than one to tell
+          // apart.
+          showRepo: this.#repos.length > 1,
         }),
       );
     }
@@ -484,22 +647,35 @@ export class CiServer {
       return reply(res, 200, "pong");
     }
 
+    if (event !== "pull_request" && event !== "push") {
+      return reply(res, 204, "");
+    }
+
+    // Which of the served repositories this webhook is for. Every repository
+    // posts to the same endpoint with the same secret, so this is what keeps
+    // their settings — and their checkouts — apart. A webhook for a repository
+    // the manifest does not list is acknowledged and dropped; answering 2xx
+    // keeps GitHub from marking the hook as broken for a misconfiguration that
+    // is ours, not the delivery's.
+    const sender = repositoryFullName(payload);
+    const repo = this.#lookup(sender);
+    if (repo === undefined) {
+      this.#log(`Ignoring webhook for unserved repository "${sender ?? "?"}"`);
+      return reply(res, 200, `Ignored (repository "${sender ?? "?"}" is not served)`);
+    }
+
     if (event === "pull_request") {
-      const decision = decidePullRequest(payload, this.#trustedPrOwners);
+      const decision = decidePullRequest(payload, repo.trustedPrOwners);
       if (!decision.run) {
         this.#log(`Ignoring pull request: ${decision.reason}`);
         return reply(res, 200, `Ignored (${decision.reason})`);
       }
-      if (this.#ignoredBranches.has(decision.event.branch)) {
+      if (repo.ignoredBranches.has(decision.event.branch)) {
         return reply(res, 200, `Ignored (branch "${decision.event.branch}")`);
       }
       // Accept now and queue the commit so the webhook returns promptly.
-      this.#enqueue(decision.event);
+      this.#enqueue(decision.event, repo);
       return reply(res, 202, "Accepted");
-    }
-
-    if (event !== "push") {
-      return reply(res, 204, "");
     }
 
     const push = parsePushEvent(payload);
@@ -510,12 +686,24 @@ export class CiServer {
     // An ignored branch is dropped here, before anything is recorded or
     // reported: no run in the history, no commit status, no log line. The
     // point of the flag is that pushes to e.g. gh-pages leave no trace at all.
-    if (this.#ignoredBranches.has(push.branch)) {
+    if (repo.ignoredBranches.has(push.branch)) {
       return reply(res, 200, `Ignored (branch "${push.branch}")`);
     }
 
-    this.#enqueue(push);
+    this.#enqueue(push, repo);
     return reply(res, 202, "Accepted");
+  }
+
+  /**
+   * The repository an event for `fullName` (`owner/repo`) belongs to, or
+   * undefined when none of the served repositories is it. A single-repository
+   * server has a catch-all repository and so builds the event whatever it
+   * names, exactly as it did before several repositories could be served.
+   */
+  #lookup(fullName: string | undefined): ServerRepo | undefined {
+    if (this.#catchAll !== undefined) return this.#catchAll;
+    if (fullName === undefined) return undefined;
+    return this.#byFullName.get(fullName.toLowerCase());
   }
 
   /**
@@ -600,13 +788,24 @@ export class CiServer {
           "carries the repository and ref needed to build its commit again",
       );
     }
+    // The history outlives any one configuration, so a run may name a
+    // repository this server no longer serves; there is then no checkout to
+    // build it from.
+    const repo = this.#lookup(event.repo);
+    if (repo === undefined) {
+      return reply(
+        res,
+        409,
+        `This run cannot be rerun: repository "${event.repo}" is no longer served`,
+      );
+    }
 
     this.#log(
       `Rerun of run ${id} requested: ${event.repo} ${event.branch}@${
         event.sha.slice(0, 12)
       }`,
     );
-    this.#enqueue(event);
+    this.#enqueue(event, repo);
     // 303 so the browser follows with a GET: reloading the dashboard afterwards
     // must not post the rerun a second time.
     res.writeHead(303, { "Location": "/" });
@@ -627,11 +826,11 @@ export class CiServer {
    * `pending` commit status right away, since otherwise its check would show
    * nothing at all for as long as the queue takes to reach it.
    */
-  #enqueue(event: CiEvent): void {
+  #enqueue(event: CiEvent, target: ServerRepo): void {
     const { repo, branch, sha, fetchRef } = event;
     const ahead = this.#queue.length + (this.#active === undefined ? 0 : 1);
     const runId = this.#store.queue({ branch, commit: sha, repo, fetchRef });
-    this.#queue.push({ event, runId });
+    this.#queue.push({ event, runId, repo: target });
     if (ahead > 0) {
       const runs = ahead === 1 ? "1 run" : `${ahead} runs`;
       this.#log(
@@ -666,7 +865,7 @@ export class CiServer {
     if (this.#active !== undefined) return;
     const next = this.#queue.shift();
     if (next === undefined) return;
-    const job = this.#runJob(next.event, next.runId)
+    const job = this.#runJob(next.event, next.runId, next.repo)
       // #runJob reports its own failures; this only catches something thrown
       // around them (a broken run history, say), which must not wedge the queue.
       .catch((err: unknown) => {
@@ -691,12 +890,19 @@ export class CiServer {
    * git operation or pipeline in flight — the pipeline stops its containers on
    * the way out — and fails the commit, so the next queued commit can start.
    */
-  async #runJob(event: CiEvent, runId: number): Promise<void> {
+  async #runJob(
+    event: CiEvent,
+    runId: number,
+    target: ServerRepo,
+  ): Promise<void> {
     const { repo, branch, sha, fetchRef } = event;
     const short = sha.slice(0, 12);
+    // Worktrees for every repository share one root, so the directory name
+    // carries the repository's name as well: two repositories can easily have
+    // a branch and even a commit prefix in common.
     const worktreeDir = resolve(
       this.#worktreeRoot,
-      `${slugifyBranch(branch)}-${short}-${this.#counter++}`,
+      `${slugifyBranch(target.name)}-${slugifyBranch(branch)}-${short}-${this.#counter++}`,
     );
     this.#log(`CI start: ${repo} ${branch}@${short} -> ${worktreeDir}`);
 
@@ -718,10 +924,11 @@ export class CiServer {
     // queue — and every commit behind it — closed forever.
     const controller = new AbortController();
     let timedOut = false;
+    const timeoutMinutes = target.jobTimeoutMinutes ?? this.#jobTimeoutMinutes;
     const expired = `CI timed out after ${
-      this.#jobTimeoutMinutes === 1 ? "1 minute" : `${this.#jobTimeoutMinutes} minutes`
+      timeoutMinutes === 1 ? "1 minute" : `${timeoutMinutes} minutes`
     }`;
-    const cancelTimeout = this.#timer(this.#jobTimeoutMinutes * 60_000, () => {
+    const cancelTimeout = this.#timer(timeoutMinutes * 60_000, () => {
       timedOut = true;
       this.#log(`${expired}: ${repo} ${branch}@${short}`);
       controller.abort();
@@ -729,14 +936,14 @@ export class CiServer {
 
     let created = false;
     try {
-      await this.#git.fetch(this.#repoRoot, fetchRef, controller.signal);
+      await this.#git.fetch(target.repoRoot, fetchRef, controller.signal);
       // Always the SHA from the event, never the tip of what was just
       // fetched: a push racing this run must not swap in a commit that never
       // passed the checks in `decidePullRequest`. If the ref has since moved
       // and the object is gone, the worktree add fails and the run errors,
       // which is the safe direction to fail in.
       await this.#git.addWorktree(
-        this.#repoRoot,
+        target.repoRoot,
         worktreeDir,
         sha,
         controller.signal,
@@ -749,6 +956,7 @@ export class CiServer {
         worktreeDir,
         (interim) => this.#store.update(runId, interim),
         controller.signal,
+        target,
       );
       // An aborted pipeline resolves with ok: false and a partial report; the
       // commit failed either way, but say which so the check is not a mystery.
@@ -776,7 +984,7 @@ export class CiServer {
       if (created) {
         // Cleanup is deliberately not bound by the timeout: leaving the
         // worktree behind would leak disk for every timed-out commit.
-        await this.#git.removeWorktree(this.#repoRoot, worktreeDir);
+        await this.#git.removeWorktree(target.repoRoot, worktreeDir);
       }
     }
   }

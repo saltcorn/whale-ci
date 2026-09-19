@@ -126,6 +126,12 @@ export interface DashboardOptions {
    * could never succeed.
    */
   loginEnabled?: boolean;
+  /**
+   * Whether to show which repository each run was for. A server serving several
+   * repositories keeps one list of runs for all of them, so the column is what
+   * tells them apart; a single-repository server would only repeat itself.
+   */
+  showRepo?: boolean;
 }
 
 /**
@@ -142,11 +148,14 @@ export function renderDashboard(
   // The rerun column exists only for a logged-in viewer; everyone else sees
   // exactly the read-only dashboard as before.
   const canRerun = options.user !== undefined;
-  const rows = runs.map((run) => renderRunRow(run, canRerun)).join("\n");
+  const showRepo = options.showRepo === true;
+  const rows = runs.map((run) => renderRunRow(run, canRerun, showRepo)).join("\n");
   const body = runs.length === 0
     ? `<p class="empty">No runs recorded yet.</p>`
     : `<table>
-  <thead><tr><th>Status</th><th>Branch</th><th>Date</th><th>Duration</th><th>Report</th>${
+  <thead><tr><th>Status</th>${
+      showRepo ? "<th>Repository</th>" : ""
+    }<th>Branch</th><th>Date</th><th>Duration</th><th>Report</th>${
       canRerun ? "<th>Rerun</th>" : ""
     }</tr></thead>
   <tbody>
@@ -185,7 +194,16 @@ function renderSession(options: DashboardOptions): string {
     : `Read-only: no ADMIN_PASSWORD is configured`;
 }
 
-function renderRunRow(run: RunRecord, canRerun: boolean): string {
+function renderRunRow(
+  run: RunRecord,
+  canRerun: boolean,
+  showRepo: boolean,
+): string {
+  // A one-shot CLI run has no repository recorded, so it shows a dash rather
+  // than pretending to belong to one of the served repositories.
+  const repo = !showRepo ? "" : run.repo !== undefined
+    ? `\n      <td>${escapeHtml(run.repo)}</td>`
+    : `\n      <td><span class="muted">—</span></td>`;
   const branch = run.branch !== undefined
     ? escapeHtml(run.branch)
     : `<span class="muted">—</span>`;
@@ -211,7 +229,7 @@ function renderRunRow(run: RunRecord, canRerun: boolean): string {
   return `    <tr>
       <td><span class="badge ${RUN_STATUS_CLASS[run.status]}">${
     RUN_STATUS_LABEL[run.status]
-  }</span></td>
+  }</span></td>${repo}
       <td>${branch}${commit}</td>
       <td>${escapeHtml(formatDate(run.startedAt))}</td>
       <td>${duration}</td>
