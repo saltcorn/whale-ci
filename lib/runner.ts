@@ -142,6 +142,10 @@ export async function runPipeline(
   // Images built from a step's `command` are throwaway snapshots, purged where
   // they are created (see `runCommands`), not here.
   const builtImages = new Map<string, string>();
+  // Volumes that already existed on the host when the run started, so teardown
+  // can tell this run's leftovers from everyone else's. Undefined until the
+  // snapshot has been taken (an interrupt can beat it), which disables the sweep.
+  let volumesBefore: Set<string> | undefined;
   let ok = true;
 
   // One record per step, created up front so the report keeps config order.
@@ -538,6 +542,26 @@ export async function runPipeline(
     }
   };
 
+  /**
+   * Drop the volumes this run left behind. Containers are removed with their
+   * anonymous volumes (see `DockerClient.stop`), but a container killed outside
+   * our reach — or one whose image declares a volume docker keeps a moment
+   * longer — can still leave one, and those were filling the host's disk. So
+   * after every container is gone, any volume that appeared during this run and
+   * is now unreferenced is removed. Volumes that predate the run, and any a
+   * concurrent run still has attached (docker refuses to remove those), are left
+   * alone. Images are never touched: they stay to seed the next run's cache.
+   */
+  const removeRunVolumes = async (): Promise<void> => {
+    if (volumesBefore === undefined) return;
+    const dangling = await docker.listVolumes(true);
+    for (const name of dangling) {
+      if (volumesBefore.has(name)) continue;
+      log(`Removing volume ${name}`);
+      await docker.removeVolume(name);
+    }
+  };
+
   // Stop every running container and remove the network. Memoised so the abort
   // handler and the normal finally share one run, and the finally awaits it even
   // when the handler started it first.
@@ -566,6 +590,7 @@ export async function runPipeline(
         await docker.tagImage(runTag, cacheTag);
         await docker.removeImage(runTag);
       }
+      await removeRunVolumes();
       await docker.removeNetwork(network);
     })();
     return teardownStarted;
@@ -583,6 +608,8 @@ export async function runPipeline(
   // Emit the initial, all-pending report before any work starts, so a server
   // can publish it the moment the run begins.
   emitProgress();
+
+  volumesBefore = new Set(await docker.listVolumes());
 
   await docker.createNetwork(network);
   try {

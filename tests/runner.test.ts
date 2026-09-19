@@ -36,6 +36,10 @@ class FakeDocker implements DockerClient {
   hangRun = new Set<string>();
   /** Called with the alias at the start of each `run` (e.g. to fire an interrupt). */
   onRun?: (alias: string) => void;
+  /** Volumes present on the host when the run starts. */
+  volumes: string[] = [];
+  /** Volumes reported as unreferenced when teardown sweeps them. */
+  danglingVolumes: string[] = [];
   #pendingRuns = new Map<string, (code: number) => void>();
 
   async createNetwork(name: string): Promise<void> {
@@ -141,6 +145,13 @@ class FakeDocker implements DockerClient {
       resolve(130);
     }
   }
+  async listVolumes(dangling?: boolean): Promise<string[]> {
+    this.events.push({ kind: "listVolumes", arg: dangling ? "dangling" : "all" });
+    return dangling ? this.danglingVolumes : this.volumes;
+  }
+  async removeVolume(name: string): Promise<void> {
+    this.events.push({ kind: "removeVolume", arg: name });
+  }
 
   kinds(kind: string): string[] {
     return this.events.filter((e) => e.kind === kind).map((e) => e.arg);
@@ -241,6 +252,33 @@ test("happy path builds, pulls, starts service, runs job, cleans up", async () =
   assert.deepEqual(docker.kinds("run"), ["test"]);
   assert.deepEqual(docker.kinds("createNetwork"), ["net"]);
   assert.deepEqual(docker.kinds("removeNetwork"), ["net"]);
+});
+
+test("teardown removes volumes the run created, keeping pre-existing ones", async () => {
+  const docker = new FakeDocker();
+  docker.volumes = ["old-cache"];
+  docker.danglingVolumes = ["old-cache", "pgdata-abc"];
+  await runPipeline(load(), { docker, ...base });
+
+  // Only the volume that appeared during the run is removed; images are kept.
+  assert.deepEqual(docker.kinds("removeVolume"), ["pgdata-abc"]);
+  assert.ok(
+    docker.at("stop:net-database") < docker.at("removeVolume:pgdata-abc"),
+    "volumes should be swept only once the containers using them are gone",
+  );
+  assert.ok(
+    docker.at("removeVolume:pgdata-abc") < docker.at("removeNetwork:net"),
+    "volumes should be swept before the network goes away",
+  );
+});
+
+test("teardown leaves volumes alone when none appeared during the run", async () => {
+  const docker = new FakeDocker();
+  docker.volumes = ["old-cache"];
+  docker.danglingVolumes = ["old-cache"];
+  await runPipeline(load(), { docker, ...base });
+
+  assert.deepEqual(docker.kinds("removeVolume"), []);
 });
 
 test("service starts before its dependent and is stopped once no longer required", async () => {

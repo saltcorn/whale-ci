@@ -99,8 +99,18 @@ export interface DockerClient {
   push(image: string, sink?: OutputSink, quiet?: boolean): Promise<void>;
   /** Remove an image by tag; never rejects. */
   removeImage(tag: string): Promise<void>;
-  /** Stop and remove a container by name; never rejects. */
+  /**
+   * Stop and remove a container by name, along with the anonymous volumes it
+   * created; never rejects.
+   */
   stop(name: string): Promise<void>;
+  /**
+   * List volume names on the host, or only the ones no container references
+   * when `dangling` is set. Never rejects; yields `[]` on failure.
+   */
+  listVolumes(dangling?: boolean): Promise<string[]>;
+  /** Remove a volume by name; never rejects (a volume still in use is kept). */
+  removeVolume(name: string): Promise<void>;
 }
 
 /**
@@ -461,10 +471,44 @@ export class CliDockerClient implements DockerClient {
 
   async stop(name: string): Promise<void> {
     try {
-      // Foreground jobs run with `--rm` may already be gone; stay quiet either way.
-      await this.#exec(["rm", "-f", name], { quiet: true });
+      // `-v` also drops the anonymous volumes the container created (the ones
+      // images like postgres declare with VOLUME); without it they outlive every
+      // run and fill the disk. Foreground jobs run with `--rm` may already be
+      // gone — those remove their anonymous volumes themselves; stay quiet
+      // either way.
+      await this.#exec(["rm", "-f", "-v", name], { quiet: true });
     } catch {
       // Best effort during teardown.
+    }
+  }
+
+  async listVolumes(dangling?: boolean): Promise<string[]> {
+    const args = ["volume", "ls", "-q"];
+    if (dangling) args.push("--filter", "dangling=true");
+    let out = "";
+    try {
+      await this.#exec(args, {
+        quiet: true,
+        sink: (chunk) => {
+          out += chunk;
+        },
+      });
+    } catch {
+      // Best effort: a listing we cannot get simply cleans nothing up.
+      return [];
+    }
+    return out
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+  }
+
+  async removeVolume(name: string): Promise<void> {
+    try {
+      await this.#exec(["volume", "rm", name], { quiet: true });
+    } catch {
+      // Best effort: docker refuses to remove a volume still in use, which is
+      // exactly what we want when another run owns it.
     }
   }
 
